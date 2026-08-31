@@ -266,6 +266,9 @@ def main(
                             port=webui_port,
                             config_files=monitor.config_files,
                             log_handler=log_broadcast_handler,
+                            # Gives the web UI a live control surface: pause /
+                            # resume, current activity, and the job schedule.
+                            monitor=monitor,
                         ),
                         logger=logger,
                     )

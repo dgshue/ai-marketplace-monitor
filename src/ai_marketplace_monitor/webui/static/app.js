@@ -28,6 +28,9 @@
     monitorState: "disconnected", // "connected" | "idle" | "disconnected"
     wsConnected: false,
     errorCount: 0, // unread ERROR-level messages (for tab badge)
+    monitorInfo: null, // last /api/monitor/state payload
+    envVars: null, // last /api/env-status payload
+    appView: "deals",
   };
 
   // ---------------------------------------------------------------
@@ -78,9 +81,20 @@
           return;
         }
       }
+      // Proxy-only mode: authentication happens at the reverse proxy and
+      // there is no password here to accept, so a form would be a dead end.
+      const subtitle = $("#login-subtitle");
+      if (info.proxy_auth && !info.password_login) {
+        $("#login-fields").hidden = true;
+        subtitle.textContent =
+          "Sign-in happens at your identity provider. Open this app through " +
+          "its SSO address (the Traefik hostname) — direct access has no " +
+          "password to accept.";
+        subtitle.hidden = false;
+        return;
+      }
       // Authenticated mode — show sign-in form.
       const form = $("#login-form");
-      const subtitle = $("#login-subtitle");
       subtitle.textContent =
         "Sign in with the marketplace credentials from your config.";
       subtitle.hidden = false;
@@ -490,6 +504,32 @@
   const renderMonitorStatus = () => {
     const chip = $("#monitor-status");
     if (!chip) return;
+    // Polled monitor state beats log-derived inference whenever available:
+    // it reports what the monitor IS doing, not what it last said.
+    const info = state.monitorInfo;
+    if (state.wsConnected && info && info.available) {
+      const act = info.activity || {};
+      if (info.paused) {
+        chip.className = "status-chip status-warn";
+        chip.textContent = "⏸ paused";
+        chip.title = "Scheduled searches are paused. Press Resume to continue.";
+      } else if (act.state === "searching") {
+        chip.className = "status-chip status-ok";
+        chip.textContent = "● searching " + (act.item || "");
+        chip.title = "A search is running now.";
+      } else {
+        const jobs = info.jobs || [];
+        const nj = jobs.find((j) => j.next_run);
+        const eta = nj
+          ? " · next " + nj.item + " in " +
+            fmtDur(new Date(nj.next_run).getTime() / 1000 - Date.now() / 1000)
+          : "";
+        chip.className = "status-chip status-ok";
+        chip.textContent = "● idle" + eta;
+        chip.title = "Monitor is idle between scheduled searches.";
+      }
+      return;
+    }
     if (!state.wsConnected) {
       chip.className = "status-chip status-err";
       chip.textContent = "● monitor: disconnected";
@@ -2304,20 +2344,272 @@
       .join("");
   };
 
-  const showPaneView = (view) => {
-    $$(".pane-tab").forEach((btn) =>
-      btn.classList.toggle("active", btn.dataset.view === view)
+  // ---------------------------------------------------------------
+  // App views -- the top nav is the router. Deals / Config / Logs / Status
+  // each own the full width; switching views refreshes what the view shows.
+  // ---------------------------------------------------------------
+  const showAppView = (view) => {
+    state.appView = view;
+    $$("#app-nav button").forEach((btn) =>
+      btn.classList.toggle("on", btn.dataset.appview === view)
     );
-    const activityView = $("#activity-view");
-    const logsView = $("#logs-view");
-    if (activityView) activityView.classList.toggle("hidden", view !== "activity");
-    if (logsView) logsView.classList.toggle("hidden", view !== "logs");
-    if (view === "activity") loadActivity();
+    ["deals", "config", "logs", "status"].forEach((name) => {
+      const el = $("#view-" + name);
+      if (el) el.classList.toggle("hidden", name !== view);
+    });
+    if (view === "deals") loadActivity();
+    else if (view === "config") {
+      // CodeMirror measures wrong if laid out while display:none.
+      if (editor.refresh) editor.refresh();
+      renderGutter();
+      renderConfigForm();
+    } else if (view === "logs") renderLogs();
+    else if (view === "status") {
+      loadMonitorState();
+      loadEnvStatus();
+    }
   };
 
-  $$(".pane-tab").forEach((btn) => {
-    btn.addEventListener("click", () => showPaneView(btn.dataset.view));
+  $$("#app-nav button").forEach((btn) => {
+    btn.addEventListener("click", () => showAppView(btn.dataset.appview));
   });
+
+  // ---------------------------------------------------------------
+  // Monitor state: one poller feeds the header chip, the pause button,
+  // and the Status page.
+  // ---------------------------------------------------------------
+  const fmtDur = (seconds) => {
+    seconds = Math.max(0, Math.round(seconds));
+    if (seconds < 90) return seconds + "s";
+    if (seconds < 5400) return Math.round(seconds / 60) + "m";
+    if (seconds < 172800) return (seconds / 3600).toFixed(1).replace(/\.0$/, "") + "h";
+    return Math.round(seconds / 86400) + "d";
+  };
+
+  const nextJob = () => {
+    const jobs = (state.monitorInfo && state.monitorInfo.jobs) || [];
+    return jobs.find((j) => j.next_run) || null;
+  };
+
+  const renderPauseBtn = () => {
+    const btn = $("#pause-btn");
+    if (!btn) return;
+    const info = state.monitorInfo;
+    btn.hidden = !(info && info.available);
+    if (info && info.available) {
+      btn.textContent = info.paused ? "▶ Resume" : "⏸ Pause";
+      btn.title = info.paused
+        ? "Resume scheduled searches"
+        : "Pause scheduled searches (schedule keeps ticking)";
+    }
+  };
+
+  const loadMonitorState = async () => {
+    try {
+      const res = await api("/api/monitor/state");
+      if (!res.ok) return;
+      state.monitorInfo = await res.json();
+      renderMonitorStatus();
+      renderPauseBtn();
+      if (state.appView === "status") renderStatusPage();
+    } catch (err) {
+      /* transient; next poll retries */
+    }
+  };
+
+  const loadEnvStatus = async () => {
+    try {
+      const res = await api("/api/env-status");
+      if (res.ok) {
+        state.envVars = (await res.json()).vars || {};
+        if (state.appView === "status") renderStatusPage();
+      }
+    } catch (err) {
+      /* ignore */
+    }
+  };
+
+  const pauseBtn = $("#pause-btn");
+  if (pauseBtn) {
+    pauseBtn.addEventListener("click", async () => {
+      const paused = state.monitorInfo && state.monitorInfo.paused;
+      try {
+        const res = await api("/api/monitor/" + (paused ? "resume" : "pause"), {
+          method: "POST",
+        });
+        if (res.ok) await loadMonitorState();
+      } catch (err) {
+        console.error(err);
+      }
+    });
+  }
+
+  const statusRefreshBtn = $("#status-refresh");
+  if (statusRefreshBtn) {
+    statusRefreshBtn.addEventListener("click", () => {
+      loadMonitorState();
+      loadEnvStatus();
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // Status page renderer. Stat tiles + tables. Status colors always ride
+  // with a word (never color alone); values wear text tokens.
+  // ---------------------------------------------------------------
+  const renderStatusPage = () => {
+    const host = $("#status-body");
+    if (!host) return;
+    const info = state.monitorInfo;
+    if (!info) {
+      host.innerHTML = '<div class="status-loading">Loading…</div>';
+      return;
+    }
+    $("#status-updated").textContent = "updated " + new Date().toLocaleTimeString();
+
+    const act = info.activity || {};
+    const fb = info.fb_session || {};
+    const now = Date.now() / 1000;
+
+    let monDot = "ok";
+    let monText = "Idle";
+    if (!info.available) {
+      monDot = "dim";
+      monText = "Not attached";
+    } else if (info.paused) {
+      monDot = "warn";
+      monText = "Paused";
+    } else if (act.state === "searching") {
+      monText = "Searching " + (act.item || "");
+    } else if (act.state === "starting") {
+      monDot = "warn";
+      monText = "Starting";
+    }
+    const upFor = info.started_at ? fmtDur(now - info.started_at) : "?";
+
+    let fbDot = "dim";
+    let fbText = "No saved session";
+    let fbDetail =
+      "Log in once through the Browser view; the session persists after that.";
+    if (fb.logged_in) {
+      fbDot = "ok";
+      fbText = "Signed in";
+      fbDetail =
+        "Session saved " +
+        (fb.saved_at ? fmtDur(now - fb.saved_at) + " ago" : "") +
+        " · survives restarts.";
+    } else if (fb.exists) {
+      fbDot = "warn";
+      fbText = "Anonymous session";
+      fbDetail =
+        "A state file exists but holds no login — complete the Facebook login via the Browser view.";
+    }
+
+    const nj = nextJob();
+    const njText = nj
+      ? esc(nj.item) +
+        " · in " +
+        fmtDur(new Date(nj.next_run).getTime() / 1000 - now)
+      : "—";
+
+    const counters = info.counters || {};
+    const notifTotals = counters["Notifications sent"] || {};
+    const notifSum = Object.values(notifTotals).reduce((a, b) => a + b, 0);
+
+    const tiles = `
+      <div class="status-grid">
+        <div class="stile"><div class="t">Monitor</div>
+          <div class="v"><span class="state-dot ${monDot}"></span>${esc(monText)}</div>
+          <div class="d">up ${esc(upFor)} · browser ${
+            info.browser_active ? "running" : "not running"
+          }</div>
+        </div>
+        <div class="stile"><div class="t">Facebook session</div>
+          <div class="v"><span class="state-dot ${fbDot}"></span>${esc(fbText)}</div>
+          <div class="d">${fbDetail}</div>
+        </div>
+        <div class="stile"><div class="t">Next search</div>
+          <div class="v">${njText}</div>
+          <div class="d">${nj ? esc(new Date(nj.next_run).toLocaleString()) : "no scheduled jobs"}</div>
+        </div>
+        <div class="stile"><div class="t">Notifications sent</div>
+          <div class="v">${notifSum}</div>
+          <div class="d">${
+            Object.keys(notifTotals)
+              .map((k) => esc(k) + ": " + notifTotals[k])
+              .join(" · ") || "none yet"
+          }</div>
+        </div>
+      </div>`;
+
+    const jobs = info.jobs || [];
+    const scheduleTable = jobs.length
+      ? `<div class="status-section">Schedule</div>
+         <table class="status-table"><thead><tr><th>Item</th><th>Last run</th><th>Next run</th></tr></thead><tbody>` +
+        jobs
+          .map(
+            (j) => `<tr>
+            <td>${esc(j.item)}</td>
+            <td>${
+              j.last_run
+                ? esc(fmtDur(now - new Date(j.last_run).getTime() / 1000)) + " ago"
+                : "—"
+            }</td>
+            <td>${
+              j.next_run
+                ? "in " + esc(fmtDur(new Date(j.next_run).getTime() / 1000 - now))
+                : "—"
+            }</td>
+          </tr>`
+          )
+          .join("") +
+        `</tbody></table>`
+      : "";
+
+    const counterCols = [
+      ["Search performed", "Searches"],
+      ["Total listing examined", "Examined"],
+      ["New AI Queries", "AI rated"],
+      ["Notifications sent", "Notified"],
+    ];
+    const itemNames = new Set();
+    counterCols.forEach(([key]) =>
+      Object.keys(counters[key] || {}).forEach((n) => itemNames.add(n))
+    );
+    const countTable = itemNames.size
+      ? `<div class="status-section">Totals</div>
+         <table class="status-table"><thead><tr><th>Item</th>${counterCols
+           .map(([, label]) => `<th style="text-align:right">${label}</th>`)
+           .join("")}</tr></thead><tbody>` +
+        Array.from(itemNames)
+          .sort()
+          .map(
+            (name) =>
+              `<tr><td>${esc(name)}</td>${counterCols
+                .map(([key]) => `<td class="num">${(counters[key] || {})[name] || 0}</td>`)
+                .join("")}</tr>`
+          )
+          .join("") +
+        `</tbody></table>`
+      : "";
+
+    const envVars = state.envVars;
+    const env =
+      envVars && Object.keys(envVars).length
+        ? `<div class="status-section">Environment variables referenced by the config</div>` +
+          Object.keys(envVars)
+            .map(
+              (name) =>
+                `<div class="envline"><span class="${envVars[name] ? "okv" : "bad"}">${
+                  envVars[name] ? "✓" : "✗"
+                }</span><span>${esc(name)}</span><span class="${
+                  envVars[name] ? "okv" : "bad"
+                }">${envVars[name] ? "set" : "not set"}</span></div>`
+            )
+            .join("")
+        : "";
+
+    host.innerHTML = tiles + scheduleTable + countTable + env;
+  };
 
   $$(".verdict-chips .chip").forEach((chip) => {
     chip.addEventListener("click", () => {
@@ -2360,6 +2652,25 @@
       if (activity.expanded.has(key)) activity.expanded.delete(key);
       else activity.expanded.add(key);
       renderActivity();
+    });
+  }
+
+  const logClearBtn = $("#log-clear");
+  if (logClearBtn) {
+    logClearBtn.addEventListener("click", () => {
+      state.records = [];
+      state.errorCount = 0;
+      renderLogs();
+      renderErrorBadge();
+    });
+  }
+
+  const logDownloadBtn = $("#log-download");
+  if (logDownloadBtn) {
+    logDownloadBtn.addEventListener("click", () => {
+      // Plain navigation so the browser handles the attachment download;
+      // the session cookie rides along automatically.
+      window.location.href = "/api/logs/download";
     });
   }
 
@@ -2413,6 +2724,11 @@
       await loadLogs();
       await loadActivity();
       connectWs();
+      loadMonitorState();
+      loadEnvStatus();
+      if (!state._monitorPoll) {
+        state._monitorPoll = setInterval(loadMonitorState, 10000);
+      }
     } catch (err) {
       console.error(err);
     }

@@ -14,83 +14,41 @@
     <form id="login-form" class="login-form">
       <h1 id="login-title">AI Marketplace Monitor</h1>
       <p id="login-subtitle" class="subtitle" hidden></p>
-      <label>Username
-        <input type="text" name="username" autocomplete="username" required />
-      </label>
-      <label>Password
-        <input type="password" name="password" autocomplete="current-password" required autofocus />
-      </label>
-      <button type="submit" id="login-submit">Sign in</button>
+      <div id="login-fields">
+        <label>Username
+          <input type="text" name="username" autocomplete="username" required />
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required autofocus />
+        </label>
+        <button type="submit" id="login-submit">Sign in</button>
+      </div>
       <p id="login-error" class="error" hidden></p>
     </form>
   </div>
 
   <div id="app" class="app hidden">
-    <header class="header">
-      <div class="header-left">
-        <span class="brand">AI Marketplace Monitor</span>
-        <span id="config-name" class="config-name">—</span>
-      </div>
-      <div class="header-right">
-        <span id="monitor-status" class="status-chip status-warn" title="Last activity from the monitor">● monitor: idle</span>
-        <button id="restart-btn" class="ghost small" title="Wake up and search all items now" aria-label="Wake up and search all items now">▶</button>
-        <a id="browser-btn" class="ghost" href="/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale" target="_blank" rel="noopener" title="Open the live Chromium view (CAPTCHA / login)" hidden>Browser</a>
-        <button id="export-csv-btn" class="ghost small" title="Download all found items as CSV" aria-label="Download all found items as CSV">⬇ Export CSV</button>
-        <button id="logout-btn" class="ghost">Logout</button>
+    <header class="topbar">
+      <span class="brand">AI<span class="brand-accent">MM</span></span>
+      <nav class="nav" id="app-nav">
+        <button data-appview="deals" class="on">Deals</button>
+        <button data-appview="config">Config</button>
+        <button data-appview="logs">Logs</button>
+        <button data-appview="status">Status</button>
+      </nav>
+      <div class="top-right">
+        <span id="monitor-status" class="status-chip status-warn" title="Monitor state">● starting…</span>
+        <button id="pause-btn" class="ghost small" title="Pause monitoring" hidden>⏸ Pause</button>
+        <button id="restart-btn" class="ghost small" title="Wake up and search all items now" aria-label="Search all items now">▶ Search now</button>
+        <a id="browser-btn" class="ghost small" href="/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale" target="_blank" rel="noopener" title="Open the live Chromium view (CAPTCHA / login)" hidden>Browser</a>
+        <button id="logout-btn" class="ghost small">Logout</button>
       </div>
     </header>
 
-    <main class="main">
-      <section class="editor-pane">
-        <div class="pane-tabs">
-          <button id="tab-form" class="pane-tab active" data-config-view="form">Form</button>
-          <button id="tab-toml" class="pane-tab" data-config-view="toml">TOML</button>
-        </div>
-        <div class="editor-toolbar">
-          <div class="add-dropdown" id="add-dropdown">
-            <button id="add-btn" class="toolbar-btn">+ Add section ▾</button>
-            <div id="add-menu" class="add-menu hidden">
-              <button data-prefix="item">Item to watch</button>
-              <button data-prefix="user">User / notification</button>
-              <button data-prefix="ai">AI backend</button>
-              <button data-prefix="marketplace">Marketplace</button>
-            </div>
-          </div>
-          <div class="toolbar-spacer"></div>
-          <button id="save-btn" class="toolbar-btn save-btn" disabled>Save</button>
-        </div>
-        <div id="config-form-view" class="config-form-view">
-          <div class="form-toolbar">
-            <span class="form-toolbar-title">Hunting</span>
-            <span id="hunting-sub" class="form-toolbar-sub"></span>
-            <div class="toolbar-spacer"></div>
-            <span class="help-label">Help</span>
-            <div class="seg" id="help-seg">
-              <button data-help="off">Off</button>
-              <button data-help="hints" class="on">Hints</button>
-              <button data-help="guided">Guided</button>
-            </div>
-          </div>
-          <div id="config-form-body" class="config-form-body"></div>
-        </div>
-        <div id="config-toml-view" class="config-toml-view hidden">
-          <div class="editor-with-gutter">
-            <div id="gutter" class="gutter"><div id="gutter-inner" class="gutter-inner"></div></div>
-            <div id="editor-host"></div>
-          </div>
-        </div>
-        <div id="editor-status" class="editor-status"></div>
-      </section>
+    <main class="main-views">
 
-      <section class="logs-pane">
-        <div class="pane-tabs">
-          <button id="tab-activity" class="pane-tab active" data-view="activity">Activity</button>
-          <button id="tab-logs" class="pane-tab" data-view="logs">Logs</button>
-          <div class="toolbar-spacer"></div>
-          <span id="activity-count" class="activity-count"></span>
-          <button id="activity-refresh" class="ghost small" title="Reload search activity">↻</button>
-        </div>
-
+      <!-- ============ Deals ============ -->
+      <section id="view-deals" class="appview">
         <div id="activity-view" class="activity-view">
           <div id="activity-summary" class="activity-summary"></div>
           <div class="activity-toolbar">
@@ -104,40 +62,109 @@
               <option value="">Any item</option>
             </select>
             <input id="activity-filter" type="search" placeholder="Filter title / comment…" />
+            <span id="activity-count" class="activity-count"></span>
+            <button id="activity-refresh" class="ghost small" title="Reload search activity">↻</button>
+            <button id="export-csv-btn" class="ghost small" title="Download all found items as CSV">⬇ CSV</button>
           </div>
           <div id="activity-rows" class="activity-rows"></div>
         </div>
+      </section>
 
-        <div id="logs-view" class="logs-view hidden">
-        <div class="logs-toolbar">
-          <div class="level-chips">
-            <button data-level="ALL" class="chip active">All</button>
-            <button data-level="INFO" class="chip">Info</button>
-            <button data-level="WARNING" class="chip">Warn</button>
-            <button data-level="ERROR" class="chip">Error</button>
+      <!-- ============ Config ============ -->
+      <section id="view-config" class="appview hidden">
+        <div class="editor-pane">
+          <div class="editor-toolbar">
+            <div class="pane-tabs config-tabs">
+              <button id="tab-form" class="pane-tab active" data-config-view="form">Form</button>
+              <button id="tab-toml" class="pane-tab" data-config-view="toml">TOML</button>
+            </div>
+            <div class="add-dropdown" id="add-dropdown">
+              <button id="add-btn" class="toolbar-btn">+ Add section ▾</button>
+              <div id="add-menu" class="add-menu hidden">
+                <button data-prefix="item">Item to watch</button>
+                <button data-prefix="user">User / notification</button>
+                <button data-prefix="ai">AI backend</button>
+                <button data-prefix="marketplace">Marketplace</button>
+              </div>
+            </div>
+            <span id="config-name" class="config-name">—</span>
+            <div class="toolbar-spacer"></div>
+            <button id="save-btn" class="toolbar-btn save-btn" disabled>Save</button>
           </div>
-          <div class="kind-chips">
-            <button data-kind="" class="chip active">Any</button>
-            <button data-kind="ai_eval" class="chip">AI eval</button>
-            <button data-kind="search_summary" class="chip">Searches</button>
-            <button data-kind="listing_skip" class="chip">Skipped</button>
-            <button data-kind="credentials_wait" class="chip">Login</button>
+          <div id="config-form-view" class="config-form-view">
+            <div class="form-toolbar">
+              <span class="form-toolbar-title">Hunting</span>
+              <span id="hunting-sub" class="form-toolbar-sub"></span>
+              <div class="toolbar-spacer"></div>
+              <span class="help-label">Help</span>
+              <div class="seg" id="help-seg">
+                <button data-help="off">Off</button>
+                <button data-help="hints" class="on">Hints</button>
+                <button data-help="guided">Guided</button>
+              </div>
+            </div>
+            <div id="config-form-body" class="config-form-body"></div>
           </div>
-          <select id="item-filter" title="Filter by item"><option value="">Any item</option></select>
-          <select id="score-filter" title="Minimum score">
-            <option value="">Any score</option>
-            <option value="3">≥ 3</option>
-            <option value="4">≥ 4</option>
-            <option value="5">= 5 (high)</option>
-          </select>
-          <input id="log-filter" type="search" placeholder="Text filter…" />
-          <label class="autoscroll">
-            <input id="autoscroll" type="checkbox" checked /> auto-scroll
-          </label>
-        </div>
-        <div id="logs" class="logs"></div>
+          <div id="config-toml-view" class="config-toml-view hidden">
+            <div class="editor-with-gutter">
+              <div id="gutter" class="gutter"><div id="gutter-inner" class="gutter-inner"></div></div>
+              <div id="editor-host"></div>
+            </div>
+          </div>
+          <div id="editor-status" class="editor-status"></div>
         </div>
       </section>
+
+      <!-- ============ Logs ============ -->
+      <section id="view-logs" class="appview hidden">
+        <div id="logs-view" class="logs-view">
+          <div class="logs-toolbar">
+            <div class="level-chips">
+              <button data-level="ALL" class="chip active">All</button>
+              <button data-level="INFO" class="chip">Info</button>
+              <button data-level="WARNING" class="chip">Warn</button>
+              <button data-level="ERROR" class="chip">Error</button>
+            </div>
+            <div class="kind-chips">
+              <button data-kind="" class="chip active">Any</button>
+              <button data-kind="ai_eval" class="chip">AI eval</button>
+              <button data-kind="search_summary" class="chip">Searches</button>
+              <button data-kind="listing_skip" class="chip">Skipped</button>
+              <button data-kind="credentials_wait" class="chip">Login</button>
+            </div>
+            <select id="item-filter" title="Filter by item"><option value="">Any item</option></select>
+            <select id="score-filter" title="Minimum score">
+              <option value="">Any score</option>
+              <option value="3">≥ 3</option>
+              <option value="4">≥ 4</option>
+              <option value="5">= 5 (high)</option>
+            </select>
+            <input id="log-filter" type="search" placeholder="Text filter…" />
+            <label class="autoscroll">
+              <input id="autoscroll" type="checkbox" checked /> auto-scroll
+            </label>
+            <button id="log-clear" class="ghost small" title="Clear the in-memory tail (the disk log is untouched)">Clear</button>
+            <button id="log-download" class="ghost small" title="Download the full log file from disk">⬇ Download</button>
+          </div>
+          <div id="logs" class="logs"></div>
+        </div>
+      </section>
+
+      <!-- ============ Status ============ -->
+      <section id="view-status" class="appview hidden">
+        <div class="status-page">
+          <div class="status-head">
+            <h2>Status</h2>
+            <span id="status-updated" class="status-updated"></span>
+            <div class="toolbar-spacer"></div>
+            <button id="status-refresh" class="ghost small" title="Refresh now">↻ Refresh</button>
+          </div>
+          <div id="status-body" class="status-body">
+            <div class="status-loading">Loading…</div>
+          </div>
+        </div>
+      </section>
+
     </main>
 
     <footer class="footer">

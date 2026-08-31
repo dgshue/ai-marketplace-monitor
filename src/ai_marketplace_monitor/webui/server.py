@@ -8,9 +8,12 @@ from the main thread to that loop via ``loop.call_soon_threadsafe``.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import socket
 import threading
@@ -34,7 +37,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..utils import cache
+from ..utils import amm_home, browser_state_file, cache, CacheType
 from .auth import (
     CSRF_COOKIE,
     CSRF_HEADER,
@@ -66,6 +69,10 @@ class WebUIConfig:
     port: int = 8467
     config_files: List[Path] = field(default_factory=list)
     log_handler: LogBroadcastHandler | None = None
+    # The running MarketplaceMonitor, when the web UI is embedded in the
+    # monitor process. Enables pause/resume and live schedule reporting;
+    # None in tests that start the web UI alone.
+    monitor: Any = None
 
 
 @dataclass
@@ -187,6 +194,62 @@ def create_app(
     sessions = SessionManager(process_secret)
     rate_limiter = RateLimiter()
 
+    # ------------------------------------------------------------------
+    # Reverse-proxy authentication (Traefik forward-auth and kin)
+    #
+    # When the UI sits behind an authenticating proxy, the proxy has already
+    # verified the user (e.g. Google SSO) and asserts the identity in a header.
+    # Trusting that header lets the web UI run with NO credentials of its own,
+    # so marketplace passwords never have to double as the UI login.
+    #
+    # The header is only believed when the TCP peer is inside
+    # AIMM_TRUSTED_PROXY_IPS — anyone else can type the header but arrives
+    # from an untrusted address and falls through to normal auth. Note the
+    # residual trust: other workloads on the trusted network segment could
+    # assert the header too, so the CIDR should be as narrow as practical.
+    # ------------------------------------------------------------------
+    proxy_auth_enabled = os.environ.get("AIMM_PROXY_AUTH") == "1"
+    proxy_header = os.environ.get("AIMM_PROXY_AUTH_HEADER", "x-forwarded-user").lower()
+    trusted_nets = []
+    for net_text in os.environ.get("AIMM_TRUSTED_PROXY_IPS", "").split(","):
+        net_text = net_text.strip()
+        if not net_text:
+            continue
+        try:
+            trusted_nets.append(ipaddress.ip_network(net_text, strict=False))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid AIMM_TRUSTED_PROXY_IPS entry %r", net_text
+            )
+
+    def proxy_user(request: Request) -> str | None:
+        if not (proxy_auth_enabled and trusted_nets and request.client):
+            return None
+        try:
+            addr = ipaddress.ip_address(request.client.host)
+        except ValueError:
+            return None
+        if not any(addr in net for net in trusted_nets):
+            return None
+        value = request.headers.get(proxy_header, "").strip()
+        return value or None
+
+    @app.middleware("http")
+    async def _proxy_session_middleware(request: Request, call_next: Any) -> Any:
+        """Mint session + CSRF cookies for proxy-authenticated visitors.
+
+        The SPA's POSTs echo the CSRF cookie in a header, so a proxy-authed
+        browser needs the same cookies a password login would set. CSRF checks
+        stay mandatory: the SSO cookie rides along on cross-site requests, so
+        proxy auth alone must never authorize a state change."""
+        response = await call_next(request)
+        if SESSION_COOKIE not in request.cookies:
+            user = proxy_user(request)
+            if user:
+                token, csrf = sessions.issue(user)
+                _set_session_cookies(response, token, csrf)
+        return response
+
     def is_open() -> bool:
         """True when running on loopback — no password required."""
         return not state.exposed
@@ -197,12 +260,17 @@ def create_app(
     ) -> str:
         if is_open():
             return "anonymous"
-        if session is None:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        username = sessions.validate(session)
-        if username is None:
-            raise HTTPException(status_code=401, detail="Session expired")
-        return username
+        if session is not None:
+            username = sessions.validate(session)
+            if username is not None:
+                return username
+        forwarded = proxy_user(request)
+        if forwarded is not None:
+            return forwarded
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated" if session is None else "Session expired",
+        )
 
     def require_csrf(
         request: Request,
@@ -224,6 +292,8 @@ def create_app(
         return {
             "open": is_open(),
             "username_hint": state.auth.username if state.auth else None,
+            "proxy_auth": proxy_auth_enabled,
+            "password_login": state.auth is not None,
         }
 
     @app.post("/api/login")
@@ -496,6 +566,109 @@ def create_app(
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    def _fb_session_summary() -> Dict[str, Any]:
+        """What the saved browser state says about the Facebook login.
+
+        c_user/xs are the cookies Facebook issues to a signed-in session;
+        their absence with a file present means the state captured an
+        anonymous browser -- worth distinguishing, because that exact case
+        looked like success once and was not.
+        """
+        out: Dict[str, Any] = {"exists": False, "logged_in": False, "saved_at": None}
+        try:
+            if browser_state_file.exists():
+                out["exists"] = True
+                out["saved_at"] = browser_state_file.stat().st_mtime
+                cookie_names = {
+                    c.get("name")
+                    for c in json.loads(browser_state_file.read_text()).get("cookies", [])
+                }
+                out["logged_in"] = {"c_user", "xs"} <= cookie_names
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass
+        return out
+
+    # Sync def: the counters live in the diskcache, and the scan must stay off
+    # the event loop.
+    @app.get("/api/monitor/state")
+    def monitor_state(_: str = Depends(require_session)) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"available": config.monitor is not None}
+        if config.monitor is not None:
+            try:
+                out.update(config.monitor.monitor_state())
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                out["error"] = str(e)
+        out["fb_session"] = _fb_session_summary()
+        counters: Dict[str, Dict[str, int]] = {}
+        try:
+            for key in cache.iterkeys():
+                if isinstance(key, tuple) and len(key) >= 3 and key[0] == CacheType.COUNTERS.value:
+                    value = cache.get(key)
+                    if isinstance(value, int):
+                        counters.setdefault(key[1], {})[key[2]] = value
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass
+        out["counters"] = counters
+        return out
+
+    @app.post("/api/monitor/pause")
+    async def pause_monitor(
+        user: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        if config.monitor is None:
+            raise HTTPException(status_code=503, detail="Monitor not attached to web UI.")
+        config.monitor.web_paused.set()
+        return {"ok": True, "paused": True}
+
+    @app.post("/api/monitor/resume")
+    async def resume_monitor(
+        user: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        if config.monitor is None:
+            raise HTTPException(status_code=503, detail="Monitor not attached to web UI.")
+        config.monitor.web_paused.clear()
+        return {"ok": True, "paused": False}
+
+    @app.get("/api/env-status")
+    def env_status(_: str = Depends(require_session)) -> Dict[str, Any]:
+        """Which ${VAR} references in the config actually resolve.
+
+        Reports set / not-set only -- never a value. Closes the gap where a
+        missing credential is silent until the first search that needed it.
+        """
+        referenced: set = set()
+        for path in config.config_files:
+            try:
+                referenced |= set(
+                    re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", path.read_text(encoding="utf-8"))
+                )
+            except OSError:
+                continue
+        return {"vars": {name: name in os.environ for name in sorted(referenced)}}
+
+    @app.get("/api/logs/download")
+    def download_log(_: str = Depends(require_session)) -> FileResponse:
+        log_path = amm_home / "ai-marketplace-monitor.log"
+        if not log_path.exists():
+            raise HTTPException(status_code=404, detail="No log file on disk yet.")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        return FileResponse(
+            log_path,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="aimm-{stamp}.log"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     # Sync def for the same reason as the CSV export: build_activity walks the
     # whole cache, so it must stay off the event loop.
     @app.get("/api/activity")
@@ -573,8 +746,10 @@ def start_webui(
         raise ValueError("WebUIConfig.log_handler is required")
     state, info = _resolve_auth(config)
 
-    # --webui-host requires credentials. Refuse to expose without auth.
-    if state.exposed and state.auth is None:
+    # --webui-host requires credentials. Refuse to expose without auth --
+    # unless an authenticating reverse proxy is declared, in which case the
+    # proxy is the credential and the UI may run without one of its own.
+    if state.exposed and state.auth is None and os.environ.get("AIMM_PROXY_AUTH") != "1":
         raise RuntimeError(
             f"--webui-host {config.host} requires authentication. "
             "Set username/password in a [marketplace.*] config section "

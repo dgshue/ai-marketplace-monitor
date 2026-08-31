@@ -1,8 +1,9 @@
 import sys
 import time
+import threading
 from logging import Logger
 from pathlib import Path
-from typing import ClassVar, List
+from typing import Any, ClassVar, Dict, List
 
 import humanize
 import inflect
@@ -59,6 +60,13 @@ class MarketplaceMonitor:
         self.defer_login_until_credentials: bool = False
         self.ai_agents: List[AIBackend] = []
         self.keyboard_monitor: KeyboardMonitor | None = None
+        # Web-driven control surface. Distinct from the keyboard pause, which
+        # is a terminal-interactive flow (pynput + rich prompts) that a web
+        # thread cannot drive. When set, scheduled searches are skipped but the
+        # schedule itself keeps ticking, so next-run times stay truthful.
+        self.web_paused = threading.Event()
+        self.web_activity: Dict[str, Any] = {"state": "starting", "item": None, "since": time.time()}
+        self.started_at = time.time()
         self.playwright: Playwright = sync_playwright().start()
         self.browser: Browser | None = None
         self.logger = logger
@@ -158,6 +166,51 @@ class MarketplaceMonitor:
                 continue
 
     def search_item(
+        self: "MarketplaceMonitor",
+        marketplace_config: TMarketplaceConfig,
+        marketplace: Marketplace,
+        item_config: TItemConfig,
+    ) -> None:
+        """Search for an item, honoring the web pause and reporting activity."""
+        if self.web_paused.is_set():
+            if self.logger:
+                self.logger.info(
+                    f"""{hilight("[Pause]", "info")} Monitoring paused — skipping scheduled search for {hilight(item_config.name)}."""
+                )
+            return
+        self.set_web_activity("searching", item_config.name)
+        try:
+            self._search_item_impl(marketplace_config, marketplace, item_config)
+        finally:
+            self.set_web_activity("idle")
+
+    def set_web_activity(
+        self: "MarketplaceMonitor", state: str, item: str | None = None
+    ) -> None:
+        self.web_activity = {"state": state, "item": item, "since": time.time()}
+
+    def monitor_state(self: "MarketplaceMonitor") -> Dict[str, Any]:
+        """Snapshot for the web UI. Reads shared structures without locking:
+        every field is a whole-object replace, so the worst case is a snapshot
+        one search stale, which the next poll corrects."""
+        jobs = []
+        for job in schedule.get_jobs():
+            jobs.append(
+                {
+                    "item": next(iter(job.tags), ""),
+                    "next_run": job.next_run.isoformat() if job.next_run else None,
+                    "last_run": job.last_run.isoformat() if job.last_run else None,
+                }
+            )
+        return {
+            "paused": self.web_paused.is_set(),
+            "activity": self.web_activity,
+            "started_at": self.started_at,
+            "browser_active": self.browser is not None,
+            "jobs": sorted(jobs, key=lambda j: j["next_run"] or "~"),
+        }
+
+    def _search_item_impl(
         self: "MarketplaceMonitor",
         marketplace_config: TMarketplaceConfig,
         marketplace: Marketplace,
