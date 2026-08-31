@@ -46,6 +46,7 @@ from .auth import (
     hash_password,
     verify_password,
 )
+from .activity import build_activity
 from .config_api import ConfigFileService
 from .config_auth import extract_credentials
 from .found_export import iter_found_csv, iter_found_rows
@@ -424,7 +425,13 @@ def create_app(
                 if not session or sessions.validate(session) is None:
                     await websocket.close(code=4401)
                     return
-            await websocket.accept(subprotocol="binary")
+            # No subprotocol. noVNC >= 1.2 calls `new WebSocket(url, [])` and so
+            # offers none; RFC 6455 requires a client to fail the connection if
+            # the server answers with one it did not offer. Replying "binary"
+            # here made Chrome drop every handshake -- the browser view showed
+            # "Failed to connect to server" no matter what. Debian bookworm,
+            # which the Dockerfile installs novnc from, ships 1.3.0.
+            await websocket.accept()
             try:
                 reader, writer = await asyncio.open_connection(vnc_host, vnc_port)
             except OSError:
@@ -479,6 +486,13 @@ def create_app(
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    # Sync def for the same reason as the CSV export: build_activity walks the
+    # whole cache, so it must stay off the event loop.
+    @app.get("/api/activity")
+    def activity(limit: int = 500, _: str = Depends(require_session)) -> Dict[str, Any]:
+        limit = max(1, min(limit, 2000))
+        return build_activity(cache, config_service.all_paths(), limit=limit)
 
     return app
 

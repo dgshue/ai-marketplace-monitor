@@ -680,3 +680,191 @@ html, body {
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* ---------------------------------------------------------------
+   Activity pane -- reviewable search results
+   Shares the log pane's slot; the tabs swap which one is visible.
+   --------------------------------------------------------------- */
+
+.pane-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.pane-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.pane-tab:hover { color: var(--text); }
+
+.pane-tab.active {
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border-color: var(--border);
+}
+
+.activity-count {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-right: 6px;
+}
+
+.activity-view,
+.logs-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.activity-view.hidden,
+.logs-view.hidden { display: none; }
+
+/* Per-item scoreboard: examined / dismissed / promising / notified. */
+.activity-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-card {
+  flex: 1 1 190px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.summary-card .item-name {
+  font-weight: 600;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.summary-stats b { display: block; font-size: 15px; color: var(--text); }
+.summary-stats .stat-promising b { color: var(--warn); }
+.summary-stats .stat-notified b { color: var(--ok); }
+
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.activity-toolbar input[type="search"] { flex: 1; min-width: 140px; }
+
+.activity-rows {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 6px 10px 12px;
+}
+
+.activity-row {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  margin-bottom: 6px;
+  padding: 8px 10px;
+}
+
+/* The left edge carries the verdict, so a glance down the list reads as a
+   column of outcomes without needing to parse the badges. */
+.activity-row.verdict-dismissed { border-left-color: var(--border); opacity: 0.72; }
+.activity-row.verdict-promising { border-left-color: var(--warn); }
+.activity-row.verdict-notified { border-left-color: var(--ok); }
+
+.activity-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.activity-row .title {
+  flex: 1;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-row .price { color: var(--ok); font-variant-numeric: tabular-nums; }
+
+.score-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.score-badge.score-high { color: var(--ok); border-color: var(--ok); }
+.score-badge.score-mid { color: var(--warn); border-color: var(--warn); }
+
+.verdict-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.verdict-badge.promising { color: var(--warn); border-color: var(--warn); }
+.verdict-badge.notified { color: var(--ok); border-color: var(--ok); }
+
+.activity-row-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  flex-wrap: wrap;
+}
+
+.activity-row-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.activity-row-detail a { color: var(--accent); }
+
+.activity-empty {
+  color: var(--text-dim);
+  text-align: center;
+  padding: 28px 10px;
+  font-size: 13px;
+}

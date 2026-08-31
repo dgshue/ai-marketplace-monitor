@@ -63,6 +63,32 @@
       </section>
 
       <section class="logs-pane">
+        <div class="pane-tabs">
+          <button id="tab-activity" class="pane-tab active" data-view="activity">Activity</button>
+          <button id="tab-logs" class="pane-tab" data-view="logs">Logs</button>
+          <div class="toolbar-spacer"></div>
+          <span id="activity-count" class="activity-count"></span>
+          <button id="activity-refresh" class="ghost small" title="Reload search activity">↻</button>
+        </div>
+
+        <div id="activity-view" class="activity-view">
+          <div id="activity-summary" class="activity-summary"></div>
+          <div class="activity-toolbar">
+            <div class="verdict-chips">
+              <button data-verdict="" class="chip active">All</button>
+              <button data-verdict="promising" class="chip">Promising</button>
+              <button data-verdict="notified" class="chip">Notified</button>
+              <button data-verdict="dismissed" class="chip">Dismissed</button>
+            </div>
+            <select id="activity-item-filter" title="Filter by item">
+              <option value="">Any item</option>
+            </select>
+            <input id="activity-filter" type="search" placeholder="Filter title / comment…" />
+          </div>
+          <div id="activity-rows" class="activity-rows"></div>
+        </div>
+
+        <div id="logs-view" class="logs-view hidden">
         <div class="logs-toolbar">
           <div class="level-chips">
             <button data-level="ALL" class="chip active">All</button>
@@ -90,6 +116,7 @@
           </label>
         </div>
         <div id="logs" class="logs"></div>
+        </div>
       </section>
     </main>
 

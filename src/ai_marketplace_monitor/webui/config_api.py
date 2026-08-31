@@ -139,6 +139,14 @@ class ConfigFileService:
     def editable_path(self) -> Path:
         return self._editable
 
+    def all_paths(self) -> List[Path]:
+        """Every config file in load order, not just the editable one.
+
+        Thresholds can be set in a non-editable base config, so the activity
+        view has to read the whole set rather than `editable_path` alone.
+        """
+        return list(self._all)
+
     def list_files(self) -> List[ConfigFileInfo]:
         stat = self._editable.stat()
         return [

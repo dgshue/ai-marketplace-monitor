@@ -1645,6 +1645,230 @@
     });
   });
 
+  // ---------------------------------------------------------------
+  // Activity pane
+  //
+  // The log tail says what the monitor is doing; this says what it found and
+  // what it thought. Data comes from /api/activity, which joins the on-disk
+  // cache -- so it survives a reload and a restart, unlike the log buffer.
+  // ---------------------------------------------------------------
+  const activity = {
+    summary: [],
+    listings: [],
+    total: 0,
+    truncated: false,
+    verdict: "",
+    item: "",
+    filter: "",
+    expanded: new Set(),
+    reloadTimer: null,
+    loading: false,
+  };
+
+  const rowKey = (row) => `${row.marketplace}:${row.id}`;
+
+  const loadActivity = async () => {
+    if (activity.loading) return;
+    activity.loading = true;
+    try {
+      const res = await api("/api/activity");
+      if (!res.ok) return;
+      const data = await res.json();
+      activity.summary = data.summary || [];
+      activity.listings = data.listings || [];
+      activity.total = data.total || 0;
+      activity.truncated = !!data.truncated;
+      syncActivityItemDropdown();
+      renderActivity();
+    } catch (err) {
+      console.error("activity load failed", err);
+    } finally {
+      activity.loading = false;
+    }
+  };
+
+  // A search burst emits one ai_eval per listing. Coalesce them so a run over
+  // 40 listings triggers one reload instead of 40 cache scans.
+  const scheduleActivityReload = () => {
+    if (activity.reloadTimer) clearTimeout(activity.reloadTimer);
+    activity.reloadTimer = setTimeout(() => {
+      activity.reloadTimer = null;
+      loadActivity();
+    }, 4000);
+  };
+
+  const syncActivityItemDropdown = () => {
+    const sel = $("#activity-item-filter");
+    if (!sel) return;
+    const names = activity.summary.map((s) => s.item).filter(Boolean);
+    const existing = new Set(Array.from(sel.options).map((o) => o.value));
+    names.forEach((name) => {
+      if (existing.has(name)) return;
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+  };
+
+  const renderActivitySummary = () => {
+    const host = $("#activity-summary");
+    if (!host) return;
+    if (!activity.summary.length) {
+      host.innerHTML = "";
+      return;
+    }
+    host.innerHTML = activity.summary
+      .map(
+        (s) => `
+        <div class="summary-card">
+          <div class="item-name" title="${esc(s.item)}">${esc(s.item)}</div>
+          <div class="summary-stats">
+            <span><b>${s.examined}</b>examined</span>
+            <span class="stat-promising"><b>${s.promising}</b>promising</span>
+            <span class="stat-notified"><b>${s.notified}</b>notified</span>
+            <span><b>${s.dismissed}</b>dismissed</span>
+          </div>
+        </div>`
+      )
+      .join("");
+  };
+
+  const visibleActivityRows = () => {
+    const needle = activity.filter.trim().toLowerCase();
+    return activity.listings.filter((row) => {
+      if (activity.verdict && row.verdict !== activity.verdict) return false;
+      if (activity.item && row.item !== activity.item) return false;
+      if (!needle) return true;
+      return (
+        (row.title || "").toLowerCase().includes(needle) ||
+        (row.comment || "").toLowerCase().includes(needle)
+      );
+    });
+  };
+
+  const renderActivity = () => {
+    renderActivitySummary();
+    const host = $("#activity-rows");
+    if (!host) return;
+
+    const rows = visibleActivityRows();
+    const counter = $("#activity-count");
+    if (counter) {
+      counter.textContent = activity.total
+        ? `${rows.length} of ${activity.total} rated`
+        : "";
+    }
+
+    if (!rows.length) {
+      host.innerHTML = `<div class="activity-empty">${
+        activity.total
+          ? "No listings match these filters."
+          : "Nothing rated yet. Listings appear here once the AI has scored them."
+      }</div>`;
+      return;
+    }
+
+    host.innerHTML = rows
+      .map((row) => {
+        const key = rowKey(row);
+        const open = activity.expanded.has(key);
+        const scoreClass =
+          row.score >= 4 ? "score-high" : row.score === 3 ? "score-mid" : "";
+        const badge =
+          row.verdict === "dismissed"
+            ? ""
+            : `<span class="verdict-badge ${row.verdict}">${row.verdict}</span>`;
+        const detail = open
+          ? `<div class="activity-row-detail">${esc(row.comment)}${
+              row.url
+                ? `\n\n<a href="${esc(row.url)}" target="_blank" rel="noopener">Open on ${esc(
+                    row.marketplace
+                  )} ↗</a>`
+                : ""
+            }</div>`
+          : "";
+        return `
+        <div class="activity-row verdict-${row.verdict}" data-key="${esc(key)}">
+          <div class="activity-row-head">
+            <span class="score-badge ${scoreClass}" title="${esc(
+          row.conclusion
+        )} (threshold ${row.threshold})">${row.score}/5</span>
+            <span class="title" title="${esc(row.title)}">${esc(row.title)}</span>
+            ${badge}
+            <span class="price">${esc(row.price)}</span>
+          </div>
+          <div class="activity-row-meta">
+            <span>${esc(row.item)}</span>
+            ${row.location ? `<span>${esc(row.location)}</span>` : ""}
+            ${row.condition ? `<span>${esc(row.condition)}</span>` : ""}
+            <span>${esc(row.conclusion)}</span>
+          </div>
+          ${detail}
+        </div>`;
+      })
+      .join("");
+  };
+
+  const showPaneView = (view) => {
+    $$(".pane-tab").forEach((btn) =>
+      btn.classList.toggle("active", btn.dataset.view === view)
+    );
+    const activityView = $("#activity-view");
+    const logsView = $("#logs-view");
+    if (activityView) activityView.classList.toggle("hidden", view !== "activity");
+    if (logsView) logsView.classList.toggle("hidden", view !== "logs");
+    if (view === "activity") loadActivity();
+  };
+
+  $$(".pane-tab").forEach((btn) => {
+    btn.addEventListener("click", () => showPaneView(btn.dataset.view));
+  });
+
+  $$(".verdict-chips .chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      activity.verdict = chip.dataset.verdict || "";
+      $$(".verdict-chips .chip").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      renderActivity();
+    });
+  });
+
+  const activityItemFilter = $("#activity-item-filter");
+  if (activityItemFilter) {
+    activityItemFilter.addEventListener("change", (e) => {
+      activity.item = e.target.value;
+      renderActivity();
+    });
+  }
+
+  const activityFilterInput = $("#activity-filter");
+  if (activityFilterInput) {
+    activityFilterInput.addEventListener("input", (e) => {
+      activity.filter = e.target.value;
+      renderActivity();
+    });
+  }
+
+  const activityRefreshBtn = $("#activity-refresh");
+  if (activityRefreshBtn) {
+    activityRefreshBtn.addEventListener("click", () => loadActivity());
+  }
+
+  const activityRowsHost = $("#activity-rows");
+  if (activityRowsHost) {
+    activityRowsHost.addEventListener("click", (e) => {
+      // Let the "open listing" link work without also toggling the row shut.
+      if (e.target.closest("a")) return;
+      const row = e.target.closest(".activity-row");
+      if (!row) return;
+      const key = row.dataset.key;
+      if (activity.expanded.has(key)) activity.expanded.delete(key);
+      else activity.expanded.add(key);
+      renderActivity();
+    });
+  }
+
   const connectWs = () => {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws/stream`);
@@ -1663,6 +1887,10 @@
         if (state.records.length > 5000) state.records.shift();
         renderLogs();
         renderMonitorStatus();
+        // A new rating or a finished search changes what the activity pane
+        // should show; the cache is already written by the time this arrives.
+        const kind = msg.record && msg.record.extra && msg.record.extra.kind;
+        if (kind === "ai_eval" || kind === "search_summary") scheduleActivityReload();
       }
     };
     ws.onclose = () => {
@@ -1686,6 +1914,7 @@
       // host is hidden during the login screen).
       if (editor.refresh) editor.refresh();
       await loadLogs();
+      await loadActivity();
       connectWs();
     } catch (err) {
       console.error(err);
