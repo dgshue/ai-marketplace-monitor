@@ -472,7 +472,16 @@ def create_app(
 
         @app.get("/")
         async def index() -> FileResponse:
-            return FileResponse(STATIC_DIR / "index.html")
+            # FileResponse sends no Cache-Control here, and "/" carries no
+            # validator a browser could revalidate against, so a cached copy of
+            # this shell can outlive an upgrade indefinitely -- the user gets
+            # new /static assets stapled to old markup, and any element added
+            # in a release is simply absent. no-cache still allows a 304 via
+            # ETag; it only forbids using the copy without asking first.
+            return FileResponse(
+                STATIC_DIR / "index.html",
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
 
     # Sync def (not async): FastAPI runs it in a threadpool and Starlette
     # iterates the sync generator there too, so the blocking cache scan never
