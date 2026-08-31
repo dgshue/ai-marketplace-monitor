@@ -190,10 +190,16 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
         for item_name, item_config in config["item"].items():
             # if marketplace is specified, it must exist
             if "marketplace" in item_config:
-                if item_config["marketplace"] not in config["marketplace"]:
-                    raise ValueError(
-                        f"Item {hilight(item_name)} specifies a marketplace that does not exist."
-                    )
+                # May be a single name or a list of them.
+                bound_names = item_config["marketplace"]
+                if isinstance(bound_names, str):
+                    bound_names = [bound_names]
+                for bound_name in bound_names:
+                    if bound_name not in config["marketplace"]:
+                        raise ValueError(
+                            f"Item {hilight(item_name)} names marketplace "
+                            f"{hilight(str(bound_name))}, which does not exist."
+                        )
 
             for marketplace_name, markerplace_config in config["marketplace"].items():
                 # Same section-name inference as get_marketplace_config, so an
@@ -208,14 +214,22 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
                         ),
                     )
                 ]
-                if (
-                    "marketplace" not in item_config
-                    or item_config["marketplace"] == marketplace_name
-                ):
-                    # use the first available marketplace
+                bound = item_config.get("marketplace")
+                if isinstance(bound, str):
+                    bound = [bound]
+                if bound is None or marketplace_name in bound:
+                    # Built by the first backend that matches -- the item field
+                    # sets are shared, so either class can serve every source it
+                    # is searched on.
+                    #
+                    # `marketplace` is passed through as the user wrote it, NOT
+                    # pinned to marketplace_name. Pinning is what the original
+                    # single-source design did, and it would silently convert
+                    # "search everywhere" into "search whichever section happens
+                    # to come first" the moment a second marketplace exists.
                     self.item[item_name] = marketplace_class.get_item_config(
                         name=item_name,
-                        marketplace=marketplace_name,
+                        marketplace=bound,
                         **{x: y for x, y in item_config.items() if x != "marketplace"},
                     )
                     break
@@ -323,10 +337,12 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
             for item_config in self.item.values():
                 if item_config.enabled is False:
                     continue
-                if (
-                    item_config.marketplace is None
-                    or item_config.marketplace == marketplace_config.name
-                ):
+                if item_config.searches_on(marketplace_config.name):
+                    backend = supported_marketplaces[
+                        marketplace_config.market_type or marketplace_config.name
+                    ]
+                    if not backend.requires_search_city:
+                        continue
                     if not item_config.search_city and not marketplace_config.search_city:
                         raise ValueError(
                             f"No search_city or search_region is specified for {item_config.name} or market {marketplace_config.name}"

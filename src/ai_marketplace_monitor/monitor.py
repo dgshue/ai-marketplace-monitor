@@ -278,6 +278,11 @@ class MarketplaceMonitor:
                 User(self.config.user[user], logger=self.logger).notify(
                     new_listings, listing_ratings, item_config
                 )
+        # Re-save the session after every search, not only at login. Facebook
+        # rotates cookies as you browse, so a state file written once at login
+        # goes stale over a long run and the restart it was meant to survive
+        # lands back on the login page. No-ops for backends without a browser.
+        marketplace.save_browser_state()
         time.sleep(5)
 
     def _select_translator(
@@ -352,8 +357,7 @@ class MarketplaceMonitor:
                     continue
 
                 if (
-                    item_config.marketplace is None
-                    or item_config.marketplace == marketplace_config.name
+                    item_config.searches_on(marketplace_config.name)
                 ):
                     # wait for some time before next search
                     # interval (in minutes) can be defined both for the marketplace

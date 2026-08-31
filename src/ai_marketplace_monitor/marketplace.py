@@ -420,7 +420,32 @@ class ItemConfig(MarketItemCommonConfig):
     keywords: List[str] | None = None
     antikeywords: List[str] | None = None
     description: str | None = None
-    marketplace: str | None = None
+    # Which sources to search this item on. A bare string is still accepted --
+    # every config written before multi-source support used one -- and is
+    # normalized to a list. None means "every enabled marketplace", which stays
+    # the default so existing configs behave exactly as they did.
+    marketplace: List[str] | None = None
+
+    def handle_marketplace(self: "ItemConfig") -> None:
+        if self.marketplace is None:
+            return
+        if isinstance(self.marketplace, str):
+            self.marketplace = [self.marketplace]
+        if not isinstance(self.marketplace, list) or not all(
+            isinstance(x, str) for x in self.marketplace
+        ):
+            raise ValueError(
+                f"Item {hilight(self.name)} marketplace must be a name or list of names."
+            )
+        if not self.marketplace:
+            raise ValueError(
+                f"Item {hilight(self.name)} marketplace list is empty. Remove the key to search "
+                "every marketplace, or name at least one."
+            )
+
+    def searches_on(self: "ItemConfig", marketplace_name: str) -> bool:
+        """True when this item should be searched on the named marketplace."""
+        return self.marketplace is None or marketplace_name in self.marketplace
 
     def handle_search_phrases(self: "ItemConfig") -> None:
         if isinstance(self.search_phrases, str):
@@ -469,6 +494,13 @@ TItemConfig = TypeVar("TItemConfig", bound=ItemConfig)
 
 
 class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
+    # Whether a search needs a geographic origin. True for site-scraping
+    # backends like Facebook, whose search URL is built around a city; false
+    # for API backends that search a whole catalogue.
+    requires_search_city = True
+    # Whether this backend drives a Playwright browser at all.
+    requires_browser = True
+
     def __init__(
         self: "Marketplace",
         name: str,

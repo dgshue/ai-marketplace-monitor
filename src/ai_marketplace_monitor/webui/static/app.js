@@ -1789,6 +1789,133 @@
     return String(value);
   };
 
+  // Guidance for the inline controls. The per-field `help:` strings in
+  // FORM_SCHEMAS cover the modal; these cover the card, and carry the "why"
+  // that the schema hints never had room for.
+  const INLINE_HELP = {
+    threshold: {
+      hint: "Listings the AI scores below this are still fetched, rated and listed under Activity as dismissed — they just never reach your phone.",
+      ex: "3 gives you nearly everything the search returns. 5 only great deals. 4 is the useful middle for something you actually want.",
+    },
+    sources: {
+      hint: "Which configured marketplaces this item is searched on. All of them when none is picked.",
+      ex: "eBay ships nationwide so distance matters less there; Facebook is local pickup, where a tighter radius pays off.",
+    },
+    enabled: {
+      hint: "Paused items keep their history and settings but are not searched.",
+      ex: "Pause rather than delete when a hunt is over — the ratings already collected stay available for comparison later.",
+    },
+  };
+
+  const helpBlock = (key) => {
+    const h = INLINE_HELP[key];
+    if (!h) return "";
+    return `<div class="fieldhelp">${esc(h.hint)}<div class="ex">${esc(h.ex)}</div></div>`;
+  };
+
+  const THRESHOLD_WORDS = {
+    1: "everything, no filtering",
+    2: "potential match or better",
+    3: "poor match or better",
+    4: "good match or better",
+    5: "great deals only",
+  };
+
+  // Write one key straight into the buffer the TOML tab shows. Same
+  // tomlEdit.edit() the section modal uses, so comments and formatting survive
+  // and Save behaves identically no matter which control produced the change.
+  const applyInline = (sectionName, key, value) => {
+    if (!window.tomlEdit) {
+      setEditorStatus("TOML editor library failed to load — use the TOML tab.", "error");
+      return false;
+    }
+    try {
+      const next = window.tomlEdit.edit(editor.getValue(), `${sectionName}.${key}`, value);
+      editor.setValue(next);
+      state.currentContent = next;
+      // setValue fires CodeMirror's change handler, but call these directly
+      // so the card re-renders and Save enables without waiting on the debounce.
+      onEditorChange();
+      refreshSectionsFromBuffer();
+      return true;
+    } catch (err) {
+      setEditorStatus(`Could not set ${key}: ${err.message}`, "error");
+      return false;
+    }
+  };
+
+  const marketplaceNames = () =>
+    state.sections.filter((s) => s.prefix === "marketplace").map((s) => s.suffix);
+
+  const renderItemCard = (section) => {
+    const fields = fieldsForSection(section);
+    const enabled = fields.enabled !== false;
+    const phrases = []
+      .concat(fields.search_phrases || [])
+      .map((p) => `“${p}”`)
+      .join(", ");
+
+    // `rating` is int or [initial, subsequent]; the steady-state value is the
+    // one that governs every run after the first.
+    let threshold = fields.rating;
+    if (Array.isArray(threshold)) threshold = threshold[threshold.length - 1];
+
+    const bound = fields.marketplace
+      ? [].concat(fields.marketplace)
+      : null; // null means every marketplace
+
+    const sources = marketplaceNames()
+      .map((mk) => {
+        const on = bound === null || bound.includes(mk);
+        return `<span class="src-toggle ${on ? "on" : ""}" data-src="${esc(mk)}">
+          <span class="pip"></span>${esc(mk)}</span>`;
+      })
+      .join("");
+
+    const thrButtons = [1, 2, 3, 4, 5]
+      .map(
+        (n) =>
+          `<button data-thr="${n}" class="${threshold === n ? "on" : ""}">${n}</button>`
+      )
+      .join("");
+
+    return `
+    <div class="config-card item-card ${enabled ? "" : "disabled"}" data-section="${esc(
+      section.name
+    )}">
+      <div class="config-card-head">
+        <span class="config-card-name">${esc(section.suffix || section.name)}</span>
+        <span class="config-field"><span class="v">${esc(phrases || "no search phrases")}</span></span>
+        <span class="config-card-actions">
+          <button data-act="edit">More settings</button>
+          <button data-act="duplicate">Duplicate</button>
+          <button data-act="delete" class="danger">Delete</button>
+        </span>
+      </div>
+
+      <div class="inline-row">
+        <span class="inline-label">Enabled</span>
+        <span class="sw ${enabled ? "on" : ""}" data-toggle="enabled"><i></i></span>
+        ${helpBlock("enabled")}
+      </div>
+
+      <div class="inline-row">
+        <span class="inline-label">Notify at rating</span>
+        <span class="thr">${thrButtons}</span>
+        <span class="thr-note">${
+          threshold ? `≥ ${threshold} — ${THRESHOLD_WORDS[threshold]}` : "inherited from marketplace"
+        }</span>
+        ${helpBlock("threshold")}
+      </div>
+
+      <div class="inline-row">
+        <span class="inline-label">Search on</span>
+        ${sources || '<span class="thr-note">no marketplaces configured</span>'}
+        ${helpBlock("sources")}
+      </div>
+    </div>`;
+  };
+
   const renderConfigForm = () => {
     const host = $("#config-form-body");
     if (!host) return;
@@ -1815,6 +1942,9 @@
 
         const cards = sections
           .map((section) => {
+            // Items are what you actually manage, so they get the richer card
+            // with the frequent edits inline instead of behind a modal.
+            if (group.prefix === "item") return renderItemCard(section);
             const fields = fieldsForSection(section);
             const keys = SUMMARY_KEYS[group.prefix] || [];
             const shown = keys
@@ -1866,6 +1996,15 @@
         </div>`;
       })
       .join("");
+
+    const sub = $("#hunting-sub");
+    if (sub) {
+      const items = state.sections.filter((s) => s.prefix === "item").length;
+      const sources = marketplaceNames().length;
+      sub.textContent = `${items} item${items === 1 ? "" : "s"} · ${sources} source${
+        sources === 1 ? "" : "s"
+      }`;
+    }
   };
 
   // Published so refreshSectionsFromBuffer, declared above this point, can
@@ -1874,7 +2013,56 @@
 
   const configFormBody = $("#config-form-body");
   if (configFormBody) {
+    // Inline controls. Each writes one key and re-renders; nothing is staged,
+    // so the TOML tab and the Save button stay the single source of truth.
     configFormBody.addEventListener("click", (e) => {
+      const itemCard = e.target.closest(".item-card");
+      if (itemCard) {
+        const sectionName = itemCard.dataset.section;
+        const fields = fieldsForSection(
+          state.sections.find((s) => s.name === sectionName) || {}
+        );
+
+        const sw = e.target.closest("[data-toggle]");
+        if (sw) {
+          applyInline(sectionName, "enabled", fields.enabled === false);
+          return;
+        }
+
+        const thr = e.target.closest("[data-thr]");
+        if (thr) {
+          let current = fields.rating;
+          if (Array.isArray(current)) current = current[current.length - 1];
+          const picked = Number(thr.dataset.thr);
+          // Clicking the active level clears it, falling back to whatever the
+          // marketplace sets -- otherwise there is no way back to inheriting.
+          applyInline(sectionName, "rating", current === picked ? null : picked);
+          return;
+        }
+
+        const src = e.target.closest("[data-src]");
+        if (src) {
+          const all = marketplaceNames();
+          const bound = fields.marketplace ? [].concat(fields.marketplace) : all.slice();
+          const name = src.dataset.src;
+          const next = bound.includes(name)
+            ? bound.filter((x) => x !== name)
+            : bound.concat([name]);
+          if (!next.length) {
+            setEditorStatus(
+              "An item needs at least one source — disable the item instead.",
+              "error"
+            );
+            return;
+          }
+          // Omit the key entirely when every source is selected, so the config
+          // keeps meaning "all marketplaces" rather than freezing today's list.
+          const sameAsAll = next.length === all.length && all.every((x) => next.includes(x));
+          applyInline(sectionName, "marketplace", sameAsAll ? null : next);
+          return;
+        }
+      }
+
       const addBtn = e.target.closest("[data-add]");
       if (addBtn) {
         openAddSectionModal(addBtn.dataset.add);
@@ -1913,6 +2101,35 @@
   $$("[data-config-view]").forEach((btn) => {
     btn.addEventListener("click", () => showConfigView(btn.dataset.configView));
   });
+
+  // Help level lives on <body> so CSS alone decides what shows -- no re-render,
+  // and it survives across every card without threading state through them.
+  const helpSeg = $("#help-seg");
+  if (helpSeg) {
+    const applyHelpLevel = (level) => {
+      document.body.classList.remove("help-hints", "help-guided");
+      if (level !== "off") document.body.classList.add("help-" + level);
+      $$("#help-seg button").forEach((b) =>
+        b.classList.toggle("on", b.dataset.help === level)
+      );
+      try {
+        localStorage.setItem("aimm.helpLevel", level);
+      } catch (_) {
+        /* private browsing: the choice just does not persist */
+      }
+    };
+    helpSeg.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (btn) applyHelpLevel(btn.dataset.help);
+    });
+    let saved = "hints";
+    try {
+      saved = localStorage.getItem("aimm.helpLevel") || "hints";
+    } catch (_) {
+      /* ignore */
+    }
+    applyHelpLevel(saved);
+  }
 
   // ---------------------------------------------------------------
   // Activity pane

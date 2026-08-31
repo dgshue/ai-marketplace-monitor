@@ -25,6 +25,7 @@ from typing import Any, Dict, Generator, List, Type
 
 import requests  # type: ignore
 
+from .facebook import FacebookMarketItemCommonConfig
 from .listing import Listing
 from .marketplace import ItemConfig, Marketplace, MarketplaceConfig
 from .utils import CounterItem, counter, hilight
@@ -70,8 +71,16 @@ def _numeric_price(value: str | None) -> str | None:
 
 
 @dataclass
-class EbayItemConfig(ItemConfig):
-    pass
+class EbayItemConfig(ItemConfig, FacebookMarketItemCommonConfig):
+    """Accepts the Facebook-specific item keys as well as the generic ones.
+
+    An item that names no marketplace is searched everywhere, and config.py
+    builds exactly one item object for it -- whichever backend it iterates
+    last. So an item carrying `condition` or `date_listed` would fail to
+    construct here, and one built here would be missing attributes Facebook's
+    search reads. Sharing the field set makes the object usable by either
+    backend regardless of iteration order; eBay maps `condition` and ignores
+    the rest."""
 
 
 @dataclass
@@ -140,6 +149,9 @@ class EbayMarketplaceConfig(MarketplaceConfig):
 class EbayMarketplace(Marketplace):
     # No browser, no login, no 2FA. The whole reason to prefer the API.
     requires_browser = False
+    # Browse searches the whole catalogue; location is a delivery filter, not
+    # an origin, so demanding a search_city here would be meaningless.
+    requires_search_city = False
 
     def __init__(
         self: "EbayMarketplace",

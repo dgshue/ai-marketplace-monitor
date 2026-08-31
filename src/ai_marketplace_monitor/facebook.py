@@ -525,7 +525,7 @@ class FacebookMarketplace(Marketplace):
             for search_phrase in item_config.search_phrases:
                 if self.logger:
                     self.logger.info(
-                        f"""{hilight("[Search]", "info")} Searching {item_config.marketplace} for """
+                        f"""{hilight("[Search]", "info")} Searching {self.name} for """
                         f"""{hilight(item_config.name)} from {hilight(cname or city)}"""
                         + (f" with radius={radius}" if radius else " with default radius")
                     )

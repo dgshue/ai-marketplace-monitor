@@ -997,3 +997,132 @@ html, body {
 /* Distance to the listing, shown beside its location. Absent when the
    location could not be geocoded -- no distance beats a wrong one. */
 .activity-row-meta .distance { color: var(--accent); }
+
+/* ---------------------------------------------------------------
+   Item-centric config: inline controls for the edits made most often
+   (enable, notification threshold, which sources), with a three-state
+   help layer over the guidance already carried in FORM_SCHEMAS.
+   --------------------------------------------------------------- */
+
+.form-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.form-toolbar-title { font-weight: 600; }
+.form-toolbar-sub { color: var(--text-dim); font-size: 12px; }
+.help-label { font-size: 12px; color: var(--text-dim); }
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.seg button {
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  padding: 4px 11px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.on { background: var(--accent-dim); color: #fff; }
+
+.item-card { border-left-width: 3px; border-left-color: var(--accent-dim); }
+.item-card.disabled { opacity: 0.6; border-left-color: var(--border); }
+
+.inline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 0 2px;
+}
+
+.inline-row + .inline-row { border-top: 1px solid rgba(42, 48, 64, 0.5); }
+.inline-label { font-size: 12px; color: var(--text-dim); min-width: 104px; }
+
+/* Threshold: a 1-5 segmented control rather than a number to type, since
+   the value is meaningless without knowing what each level means. */
+.thr { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+
+.thr button {
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.thr button + button { border-left: 1px solid var(--border); }
+.thr button.on { background: var(--accent-dim); color: #fff; }
+.thr-note { font-size: 11.5px; color: var(--text-dim); }
+
+.src-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px 9px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.src-toggle.on { border-color: var(--accent); }
+.src-toggle .pip { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+.src-toggle.on .pip { background: var(--ok); }
+
+.sw {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  flex: none;
+}
+
+.sw i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: 0.15s;
+}
+
+.sw.on { background: var(--accent-dim); border-color: var(--accent); }
+.sw.on i { left: 18px; background: #fff; }
+
+/* Help layer. Hidden entirely at "off" so users who know the tool keep
+   today's density. */
+.fieldhelp { display: none; font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-top: 4px; }
+body.help-hints .fieldhelp,
+body.help-guided .fieldhelp { display: block; }
+
+.fieldhelp .ex {
+  display: none;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--bg-elev-2);
+  border-left: 2px solid var(--accent-dim);
+  border-radius: 0 5px 5px 0;
+  color: var(--text);
+}
+
+body.help-guided .fieldhelp .ex { display: block; }
