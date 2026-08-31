@@ -1388,3 +1388,42 @@ table.status-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .deals-split { grid-template-columns: 1fr; }
   .deal-detail { border-top: 1px solid var(--border); max-height: 45vh; }
 }
+
+/* User rank + hide: the user's own read on a listing, beside the AI's. */
+.myrank { color: var(--warn); font-size: 12px; white-space: nowrap; }
+
+.dd-myrank {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.dd-myrank .k { color: var(--text-dim); }
+.dd-myrank .hint { color: var(--text-dim); font-size: 11.5px; }
+
+.dd-myrank .star {
+  background: transparent;
+  border: 0;
+  color: var(--warn);
+  font-size: 19px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.dd-myrank .star:not(.on) { color: var(--text-dim); }
+.dd-myrank .star:hover { transform: scale(1.15); }
+
+.dd-actions .ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 7px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dd-actions .ghost:hover { color: var(--text); border-color: var(--accent); }

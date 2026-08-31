@@ -933,7 +933,7 @@
         help: "Non-English Facebook locale — must match a [translation.*] section." },
 
       // ---- Right column: Shared — can be overridden per-item ----
-      { key: "search_city", label: "Search city", type: "text", required: true, column: "right",
+      { key: "search_city", label: "Search city", type: "text", required: true, keepString: true, column: "right",
         help: "City code from the Facebook Marketplace URL (lowercase, e.g. 'houston')." },
       { key: "search_region", label: "Search region", type: "select", column: "right",
         options: [{ value: "", label: "(none)" }].concat(
@@ -1496,10 +1496,19 @@
         // validator, which wants an integer. Coerce explicitly-marked fields.
         value = parseInt(newVal, 10);
         if (isNaN(value)) { errors.push(`${fieldDef.label} must be a number.`); return; }
+      } else if (!fieldDef.keepString && /^-?\d+$/.test(newVal) && !newVal.includes(",")) {
+        // An integer doesn't wear quotes. Bare-integer text becomes a TOML
+        // int — the backend coerces int→str where it wants strings (prices),
+        // and fields that MUST stay strings (search_city: the validator
+        // rejects non-strings) carry keepString in their schema.
+        value = parseInt(newVal, 10);
       } else if (newVal.includes(",") && fieldDef.type === "text") {
         const original = formContext.fields[fieldDef.key];
         if (Array.isArray(original) || newVal.includes(",")) {
           value = newVal.split(",").map((s) => s.trim()).filter(Boolean);
+          if (!fieldDef.keepString && value.every((x) => /^-?\d+$/.test(x))) {
+            value = value.map((x) => parseInt(x, 10)); // e.g. radius wants ints
+          }
         } else {
           value = newVal;
         }
@@ -1603,35 +1612,31 @@
       return;
     }
 
-    // For rename: delete the old section, then generate a fresh block
-    // with the new name + all form values. This avoids fragile line-
-    // patching and reuses the same code path as "add mode".
+    // Rename rewrites ONLY the section header line, in place. The previous
+    // approach deleted the section and regenerated it from the form's values,
+    // which silently dropped every key the form did not carry — a rename of
+    // [marketplace.facebook] once lost home_location, login_wait_time and
+    // search_interval this way. After the header rewrite, the field edits
+    // fall through to the same patch-in-place path as a plain edit.
+    let targetName = formContext.sectionName;
     if (renamed) {
       const section = state.sections.find((s) => s.name === formContext.sectionName);
-      if (section) {
-        const lines = state.currentContent.split("\n");
-        let start = section.line_start;
-        if (start > 0 && lines[start - 1].trim() === "") start--;
-        const after = lines.slice(0, start).concat(lines.slice(section.line_end));
-        state.currentContent = after.join("\n");
+      if (!section) {
+        $("#form-error").textContent = "Section not found in the buffer — reload and retry.";
+        $("#form-error").hidden = false;
+        return;
       }
-      // Now append the new section (same logic as add mode).
-      const block = generateSectionToml(newFullName, values);
-      let buffer = state.currentContent;
-      const samePrefixSections = scanSectionsClient(buffer).filter(
-        (s) => s.prefix === prefix
+      const lines = state.currentContent.split("\n");
+      lines[section.line_start] = lines[section.line_start].replace(
+        /\[[^\]]+\]/,
+        "[" + newFullName + "]"
       );
-      if (samePrefixSections.length) {
-        const last = samePrefixSections[samePrefixSections.length - 1];
-        const lines = buffer.split("\n");
-        lines.splice(last.line_end, 0, "", ...block.split("\n"));
-        buffer = lines.join("\n");
-      } else {
-        buffer = buffer.replace(/\n*$/, "") + "\n\n" + block;
-      }
-      editor.setValue(buffer);
-      state.currentContent = buffer;
-    } else {
+      state.currentContent = lines.join("\n");
+      editor.setValue(state.currentContent);
+      refreshSectionsFromBuffer();
+      targetName = newFullName;
+    }
+    {
       // No rename — patch fields in place via tomlEdit.edit().
       if (!window.tomlEdit) {
         $("#form-error").textContent =
@@ -1646,7 +1651,7 @@
         if (fieldDef.key in values) {
           try {
             buffer = window.tomlEdit.edit(
-              buffer, formContext.sectionName + "." + fieldDef.key, values[fieldDef.key]
+              buffer, targetName + "." + fieldDef.key, values[fieldDef.key]
             );
           } catch (err) {
             editErrors.push(`Failed to set ${fieldDef.key}: ${err.message}`);
@@ -2314,7 +2319,14 @@
   const visibleActivityRows = () => {
     const needle = activity.filter.trim().toLowerCase();
     return activity.listings.filter((row) => {
-      if (activity.verdict && row.verdict !== activity.verdict) return false;
+      // "hidden" is user state, orthogonal to the AI verdict: off the radar
+      // but fully tracked. Its own chip shows them; every other view hides.
+      if (activity.verdict === "hidden") {
+        if (!row.hidden) return false;
+      } else {
+        if (row.hidden) return false;
+        if (activity.verdict && row.verdict !== activity.verdict) return false;
+      }
       if (activity.item && row.item !== activity.item) return false;
       if (!needle) return true;
       return (
@@ -2360,8 +2372,55 @@
       }</div>${esc(row.comment || "(no reasoning recorded)")}</div>
       <div class="dd-actions">
         ${row.url ? `<a class="primary" href="${esc(row.url)}" target="_blank" rel="noopener">Open listing \u2197</a>` : ""}
+        <button class="ghost small" data-flag="hide">${row.hidden ? "Restore" : "Dismiss"}</button>
+      </div>
+      <div class="dd-myrank">
+        <span class="k">My rating</span>
+        <span class="stars" data-flag="rank">${[1, 2, 3, 4, 5]
+          .map(
+            (n) =>
+              `<button class="star ${row.my_rank >= n ? "on" : ""}" data-rank="${n}">${
+                row.my_rank >= n ? "\u2605" : "\u2606"
+              }</button>`
+          )
+          .join("")}</span>
+        <span class="hint">${
+          row.my_rank ? "click the same star to clear" : "your own read, separate from the AI's"
+        }</span>
       </div>`;
   };
+
+  const sendFlag = async (row, payload) => {
+    try {
+      const res = await api("/api/listing/flag", {
+        method: "POST",
+        body: JSON.stringify({ marketplace: row.marketplace, id: row.id, ...payload }),
+      });
+      if (!res.ok) return;
+      const flags = (await res.json()).flags || {};
+      row.my_rank = flags.my_rank ?? null;
+      row.hidden = !!flags.hidden;
+      renderActivity();
+    } catch (err) {
+      console.error("flag update failed", err);
+    }
+  };
+
+  const dealDetailHost = $("#deal-detail");
+  if (dealDetailHost) {
+    dealDetailHost.addEventListener("click", (e) => {
+      const row = activity.listings.find((r) => rowKey(r) === activity.selected);
+      if (!row) return;
+      const star = e.target.closest(".star");
+      if (star) {
+        const picked = Number(star.dataset.rank);
+        sendFlag(row, { my_rank: row.my_rank === picked ? null : picked });
+        return;
+      }
+      const hide = e.target.closest('[data-flag="hide"]');
+      if (hide) sendFlag(row, { hidden: !row.hidden });
+    });
+  }
 
   const renderActivity = () => {
     renderActivitySummary();
@@ -2404,6 +2463,7 @@
           <div class="top">
             <span class="score-badge ${scoreClass}">${row.score}</span>
             <span class="t" title="${esc(row.title)}">${esc(row.title)}</span>
+            ${row.my_rank ? `<span class="myrank">★${row.my_rank}</span>` : ""}
             <span class="p">${esc(row.price)}</span>
           </div>
           <div class="m">

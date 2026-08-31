@@ -186,6 +186,25 @@ def _collect_notified(local_cache: Cache) -> Dict[Tuple[str, str], str]:
     return notified
 
 
+def _collect_flags(local_cache: Cache) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """(marketplace, listing_id) -> user flags: my_rank and hidden."""
+    flags: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for key in local_cache.iterkeys():
+        if not isinstance(key, tuple) or len(key) < 3:
+            continue
+        if key[0] != CacheType.USER_FLAGS.value:
+            continue
+        try:
+            value = local_cache.get(key)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            flags[(key[1], key[2])] = value
+    return flags
+
+
 def _rehydrate(value: Any) -> Optional[Listing]:
     """Turn a cached LISTING_DETAILS value back into a Listing, or None.
 
@@ -213,6 +232,7 @@ def build_activity(
     home = home_from_config(config_files)
     ratings = _collect_ratings(local_cache)
     notified = _collect_notified(local_cache)
+    user_flags = _collect_flags(local_cache)
 
     rows: List[Dict[str, Any]] = []
     seen_hashes: Set[str] = set()
@@ -281,6 +301,11 @@ def build_activity(
                     "threshold": threshold,
                     "verdict": verdict,
                     "notified_at": notified.get((listing.marketplace, listing.id), ""),
+                    # The user's own read on the listing, orthogonal to the AI's.
+                    "my_rank": user_flags.get((listing.marketplace, listing.id), {}).get("my_rank"),
+                    "hidden": bool(
+                        user_flags.get((listing.marketplace, listing.id), {}).get("hidden")
+                    ),
                 }
             )
 

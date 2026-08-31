@@ -89,6 +89,9 @@ class CacheType(Enum):
     AI_INQUIRY = "ai-inquiries"
     USER_NOTIFIED = "user-notifications"
     COUNTERS = "counters"
+    # Per-listing state the user sets in the web UI: their own 1-5 rank and a
+    # hidden flag ("off my radar, still tracked"). Key: (tag, marketplace, id).
+    USER_FLAGS = "user-flags"
 
 
 class CounterItem(Enum):

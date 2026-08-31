@@ -637,6 +637,40 @@ def create_app(
         config.monitor.web_paused.clear()
         return {"ok": True, "paused": False}
 
+    @app.post("/api/listing/flag")
+    async def flag_listing(
+        request: Request,
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        """Set the user's own state on a listing: my_rank (1-5 or null) and/or
+        hidden. Stored in the diskcache keyed by (marketplace, id) so it joins
+        the same way ratings do — hidden listings stay fully tracked."""
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="JSON body required")
+        marketplace = str(body.get("marketplace") or "").strip()
+        listing_id = str(body.get("id") or "").strip()
+        if not marketplace or not listing_id:
+            raise HTTPException(status_code=400, detail="marketplace and id are required")
+        key = (CacheType.USER_FLAGS.value, marketplace, listing_id)
+        current = cache.get(key)
+        flags: Dict[str, Any] = dict(current) if isinstance(current, dict) else {}
+        if "my_rank" in body:
+            rank = body["my_rank"]
+            if rank is None:
+                flags.pop("my_rank", None)
+            elif isinstance(rank, int) and 1 <= rank <= 5:
+                flags["my_rank"] = rank
+            else:
+                raise HTTPException(status_code=400, detail="my_rank must be 1-5 or null")
+        if "hidden" in body:
+            flags["hidden"] = bool(body["hidden"])
+        flags["updated_at"] = time.time()
+        cache.set(key, flags, tag=CacheType.USER_FLAGS.value)
+        return {"ok": True, "flags": flags}
+
     @app.get("/api/env-status")
     def env_status(_: str = Depends(require_session)) -> Dict[str, Any]:
         """Which ${VAR} references in the config actually resolve.

@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import threading
@@ -101,7 +102,43 @@ class MarketplaceMonitor:
                 continue
 
     def _launch_browser(self: "MarketplaceMonitor") -> Browser:
-        """Launch a browser, preferring Chromium if available, otherwise any installed browser."""
+        """Launch a browser, preferring a persistent Chromium profile.
+
+        A persistent profile (user-data-dir in amm_home, i.e. the mounted
+        volume) is what actually survives restarts: cookies, localStorage,
+        IndexedDB, and the device-trust state behind Facebook's "approve this
+        login" prompt. The storage_state snapshot approach kept losing the
+        race — it captured whatever the context held at save time, which
+        during a login-approval flow is an anonymous session, so every
+        restart re-prompted for approval.
+
+        Returns a BrowserContext in this mode; callers detect which they got
+        by the absence of new_context. Set AIMM_EPHEMERAL_BROWSER=1 to force
+        the old throwaway launch.
+        """
+        if os.environ.get("AIMM_EPHEMERAL_BROWSER") != "1":
+            profile_dir = amm_home / "browser-profile"
+            try:
+                context = self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=self.headless,
+                )
+                if self.logger:
+                    self.logger.info(
+                        f"""{hilight("[Browser]", "info")} Launched chromium with persistent profile {hilight(str(profile_dir))}.""",
+                        extra=aimm_event("browser_ready", engine="chromium-persistent"),
+                    )
+                return context  # type: ignore[return-value]
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                # A corrupt or version-mismatched profile must not take the
+                # monitor down; fall back to the ephemeral launch and say so.
+                if self.logger:
+                    self.logger.warning(
+                        f"""{hilight("[Browser]", "fail")} Persistent profile failed ({e}); falling back to ephemeral browser."""
+                    )
+
         # Try browsers in order of preference
         browser_types = [
             ("chromium", self.playwright.chromium),

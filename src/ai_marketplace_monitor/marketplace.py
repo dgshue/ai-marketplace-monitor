@@ -562,6 +562,14 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
             self.page = None
 
         if self.page is None:
+            # A persistent profile arrives as a BrowserContext (no new_context
+            # attribute): pages open directly in it and every kind of state
+            # persists on disk, so the storage_state restore below is only for
+            # the ephemeral-Browser path. Proxy swapping needs per-context
+            # proxies, which a persistent profile cannot do -- ignored there.
+            if not hasattr(self.browser, "new_context"):
+                self.page = self.browser.new_page()
+                return self.page
             proxy = (
                 None
                 if self.config.monitor_config is None
