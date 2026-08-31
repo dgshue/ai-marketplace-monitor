@@ -868,3 +868,128 @@ html, body {
   padding: 28px 10px;
   font-size: 13px;
 }
+
+/* ---------------------------------------------------------------
+   Config form view -- the Form tab beside the raw TOML editor.
+   Both edit the same buffer; Save commits whichever you used.
+   --------------------------------------------------------------- */
+
+.config-form-view,
+.config-toml-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.config-form-view.hidden,
+.config-toml-view.hidden { display: none; }
+
+.config-form-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+}
+
+.config-group { margin-bottom: 18px; }
+
+.config-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.config-group-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.config-group-head .toolbar-spacer { flex: 1; }
+
+.config-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.config-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-card-name {
+  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.config-card-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.config-card-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.config-card-actions button:hover { color: var(--text); border-color: var(--accent); }
+.config-card-actions button.danger:hover { color: var(--err); border-color: var(--err); }
+
+/* Key settings at a glance, so the card is readable without opening it. */
+.config-card-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.config-field {
+  display: flex;
+  gap: 5px;
+  max-width: 100%;
+}
+
+.config-field .k { color: var(--text-dim); }
+
+.config-field .v {
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
+.config-field .v.unset { color: var(--text-dim); font-style: italic; font-family: inherit; }
+
+.config-card-more {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.config-form-empty {
+  color: var(--text-dim);
+  padding: 24px 4px;
+  font-size: 13px;
+}
+
+.config-noschema {
+  font-size: 11px;
+  color: var(--warn);
+  margin-top: 6px;
+}

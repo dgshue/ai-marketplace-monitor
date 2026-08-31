@@ -676,6 +676,11 @@
   const refreshSectionsFromBuffer = () => {
     state.sections = scanSectionsClient(editor.getValue());
     renderGutter();
+    // Keep the form tab in step with edits made in the TOML tab, so switching
+    // back never shows a stale card. Called through state because the renderer
+    // is declared further down: a bare `typeof renderConfigForm` would still
+    // throw here, since typeof does not shield a const in its dead zone.
+    if (state.renderConfigForm) state.renderConfigForm();
   };
 
   // -------- Popover menu (Edit / Delete / Add another) --------
@@ -1646,6 +1651,206 @@
   });
 
   // ---------------------------------------------------------------
+  // Config form view
+  //
+  // A browsable view of the same buffer the TOML editor holds. Editing goes
+  // through the existing section modal and its FORM_SCHEMAS, so this adds a
+  // way in rather than a second implementation -- Save still commits the one
+  // buffer, whichever tab produced the change.
+  // ---------------------------------------------------------------
+  const CONFIG_GROUPS = [
+    { prefix: "marketplace", title: "Marketplace", addable: true },
+    { prefix: "item", title: "Items to watch", addable: true },
+    { prefix: "ai", title: "AI backends", addable: true },
+    { prefix: "user", title: "Users", addable: true },
+    { prefix: "notification", title: "Notifications", addable: false },
+    { prefix: "translation", title: "Translations", addable: false },
+  ];
+
+  // The handful of keys worth showing on a collapsed card -- enough to tell
+  // two sections apart without opening either.
+  const SUMMARY_KEYS = {
+    marketplace: ["search_city", "search_interval", "rating", "notify"],
+    item: ["enabled", "search_phrases", "min_price", "max_price", "rating"],
+    ai: ["provider", "model", "base_url"],
+    user: ["notify_with", "email"],
+    notification: [
+      "ntfy_server",
+      "ntfy_topic",
+      "pushover_user_key",
+      "smtp_username",
+      "telegram_chat_id",
+    ],
+    translation: ["locale"],
+  };
+
+  // tomlEdit.parse on every card would re-parse the whole document per section,
+  // so parse once per distinct buffer and hand out slices of the result.
+  const parsedConfig = { content: null, tree: null };
+
+  const configTree = () => {
+    // Read the editor, not state.currentContent: the latter is only synced at
+    // certain points, so mid-edit it can lag and the cards would show stale
+    // values against freshly rescanned section names.
+    const content =
+      (editor && editor.getValue ? editor.getValue() : state.currentContent) || "";
+    if (parsedConfig.content === content) return parsedConfig.tree;
+    let tree = null;
+    if (window.tomlEdit) {
+      try {
+        tree = window.tomlEdit.parse(content);
+      } catch (err) {
+        tree = null; // half-typed TOML mid-edit; cards fall back to name only
+      }
+    }
+    parsedConfig.content = content;
+    parsedConfig.tree = tree;
+    return tree;
+  };
+
+  const fieldsForSection = (section) => {
+    if (section.fields && Object.keys(section.fields).length) return section.fields;
+    const tree = configTree();
+    if (!tree) return {};
+    let node = tree;
+    for (const part of section.name.split(".")) {
+      node = node && node[part];
+    }
+    return node && typeof node === "object" && !Array.isArray(node) ? node : {};
+  };
+
+  const formatConfigValue = (value) => {
+    if (Array.isArray(value)) return value.join(", ");
+    if (typeof value === "boolean") return value ? "true" : "false";
+    return String(value);
+  };
+
+  const renderConfigForm = () => {
+    const host = $("#config-form-body");
+    if (!host) return;
+
+    if (!state.sections.length) {
+      host.innerHTML =
+        '<div class="config-form-empty">No sections yet. Use “+ Add section” above to create one.</div>';
+      return;
+    }
+
+    const known = new Set(CONFIG_GROUPS.map((g) => g.prefix));
+    const groups = CONFIG_GROUPS.concat(
+      // Anything the config uses that we have no group for still has to be
+      // reachable, or the form tab would silently hide part of the file.
+      Array.from(new Set(state.sections.map((s) => s.prefix)))
+        .filter((p) => !known.has(p))
+        .map((p) => ({ prefix: p, title: p, addable: false }))
+    );
+
+    host.innerHTML = groups
+      .map((group) => {
+        const sections = state.sections.filter((s) => s.prefix === group.prefix);
+        if (!sections.length && !group.addable) return "";
+
+        const cards = sections
+          .map((section) => {
+            const fields = fieldsForSection(section);
+            const keys = SUMMARY_KEYS[group.prefix] || [];
+            const shown = keys
+              .filter((k) => fields[k] !== undefined)
+              .map(
+                (k) =>
+                  `<span class="config-field"><span class="k">${esc(k)}</span>` +
+                  `<span class="v">${esc(formatConfigValue(fields[k]))}</span></span>`
+              );
+            const extra = Object.keys(fields).length - shown.length;
+            const hasSchema = !!findFormSchema(section.name);
+            return `
+            <div class="config-card" data-section="${esc(section.name)}">
+              <div class="config-card-head">
+                <span class="config-card-name">[${esc(section.name)}]</span>
+                <span class="config-card-actions">
+                  <button data-act="edit">Edit</button>
+                  <button data-act="duplicate">Duplicate</button>
+                  <button data-act="delete" class="danger">Delete</button>
+                </span>
+              </div>
+              ${
+                shown.length
+                  ? `<div class="config-card-fields">${shown.join("")}</div>`
+                  : '<div class="config-card-fields"><span class="config-field"><span class="v unset">no settings</span></span></div>'
+              }
+              ${extra > 0 ? `<div class="config-card-more">+${extra} more</div>` : ""}
+              ${
+                hasSchema
+                  ? ""
+                  : '<div class="config-noschema">No form for this section type — Edit opens the TOML instead.</div>'
+              }
+            </div>`;
+          })
+          .join("");
+
+        return `
+        <div class="config-group">
+          <div class="config-group-head">
+            <span class="config-group-title">${esc(group.title)}</span>
+            <div class="toolbar-spacer"></div>
+            ${
+              group.addable
+                ? `<button class="toolbar-btn small" data-add="${esc(group.prefix)}">+ Add</button>`
+                : ""
+            }
+          </div>
+          ${cards || '<div class="config-form-empty">None configured.</div>'}
+        </div>`;
+      })
+      .join("");
+  };
+
+  // Published so refreshSectionsFromBuffer, declared above this point, can
+  // reach the renderer without tripping over the const's dead zone.
+  state.renderConfigForm = renderConfigForm;
+
+  const configFormBody = $("#config-form-body");
+  if (configFormBody) {
+    configFormBody.addEventListener("click", (e) => {
+      const addBtn = e.target.closest("[data-add]");
+      if (addBtn) {
+        openAddSectionModal(addBtn.dataset.add);
+        return;
+      }
+      const actionBtn = e.target.closest("[data-act]");
+      if (!actionBtn) return;
+      const card = actionBtn.closest(".config-card");
+      if (!card) return;
+      const section = state.sections.find((s) => s.name === card.dataset.section);
+      if (!section) return;
+      const act = actionBtn.dataset.act;
+      if (act === "edit") openEditSectionModal(section.name);
+      else if (act === "duplicate") duplicateSection(section);
+      else if (act === "delete") deleteSection(section);
+    });
+  }
+
+  const showConfigView = (view) => {
+    $$("[data-config-view]").forEach((btn) =>
+      btn.classList.toggle("active", btn.dataset.configView === view)
+    );
+    const formView = $("#config-form-view");
+    const tomlView = $("#config-toml-view");
+    if (formView) formView.classList.toggle("hidden", view !== "form");
+    if (tomlView) tomlView.classList.toggle("hidden", view !== "toml");
+    if (view === "form") {
+      renderConfigForm();
+    } else if (editor.refresh) {
+      // CodeMirror measures wrong if it was laid out while display:none.
+      editor.refresh();
+      renderGutter();
+    }
+  };
+
+  $$("[data-config-view]").forEach((btn) => {
+    btn.addEventListener("click", () => showConfigView(btn.dataset.configView));
+  });
+
+  // ---------------------------------------------------------------
   // Activity pane
   //
   // The log tail says what the monitor is doing; this says what it found and
@@ -1913,6 +2118,9 @@
       // CodeMirror needs a refresh after becoming visible (the editor
       // host is hidden during the login screen).
       if (editor.refresh) editor.refresh();
+      // The Form tab is the default, so it has to be populated before the user
+      // ever clicks a tab.
+      renderConfigForm();
       await loadLogs();
       await loadActivity();
       connectWs();

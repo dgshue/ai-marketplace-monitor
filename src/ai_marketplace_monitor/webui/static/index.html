@@ -42,6 +42,10 @@
 
     <main class="main">
       <section class="editor-pane">
+        <div class="pane-tabs">
+          <button id="tab-form" class="pane-tab active" data-config-view="form">Form</button>
+          <button id="tab-toml" class="pane-tab" data-config-view="toml">TOML</button>
+        </div>
         <div class="editor-toolbar">
           <div class="add-dropdown" id="add-dropdown">
             <button id="add-btn" class="toolbar-btn">+ Add section ▾</button>
@@ -55,9 +59,14 @@
           <div class="toolbar-spacer"></div>
           <button id="save-btn" class="toolbar-btn save-btn" disabled>Save</button>
         </div>
-        <div class="editor-with-gutter">
-          <div id="gutter" class="gutter"><div id="gutter-inner" class="gutter-inner"></div></div>
-          <div id="editor-host"></div>
+        <div id="config-form-view" class="config-form-view">
+          <div id="config-form-body" class="config-form-body"></div>
+        </div>
+        <div id="config-toml-view" class="config-toml-view hidden">
+          <div class="editor-with-gutter">
+            <div id="gutter" class="gutter"><div id="gutter-inner" class="gutter-inner"></div></div>
+            <div id="editor-host"></div>
+          </div>
         </div>
         <div id="editor-status" class="editor-status"></div>
       </section>
