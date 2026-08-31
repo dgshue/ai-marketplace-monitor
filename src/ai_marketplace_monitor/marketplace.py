@@ -1,3 +1,4 @@
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -13,6 +14,7 @@ from .utils import (
     KeyboardMonitor,
     MonitorConfig,
     Translator,
+    browser_state_file,
     convert_to_seconds,
     hilight,
 )
@@ -527,15 +529,46 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
             self.page = None
 
         if self.page is None:
-            context = self.browser.new_context(
-                proxy=(
-                    None
-                    if self.config.monitor_config is None
-                    else self.config.monitor_config.get_proxy_options()
-                )
+            proxy = (
+                None
+                if self.config.monitor_config is None
+                else self.config.monitor_config.get_proxy_options()
             )
+            # Restore the saved session so a restart does not land back on the
+            # login page. A state file written by an older Playwright, or one
+            # truncated by a hard kill, makes new_context raise -- fall back to
+            # a blank context rather than refusing to start.
+            state = str(browser_state_file) if browser_state_file.exists() else None
+            try:
+                context = self.browser.new_context(storage_state=state, proxy=proxy)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                if state is None:
+                    raise
+                if self.logger:
+                    self.logger.warning(
+                        f"""{hilight("[Login]", "fail")} Ignoring unreadable browser state: {e!s}"""
+                    )
+                context = self.browser.new_context(proxy=proxy)
             self.page = context.new_page()
         return self.page
+
+    def save_browser_state(self: "Marketplace") -> None:
+        """Persist cookies and localStorage so the next run starts logged in."""
+        if self.page is None:
+            return
+        try:
+            # Write then chmod, not the reverse: storage_state creates the file
+            # itself, so tightening it beforehand would be undone.
+            self.page.context.storage_state(path=str(browser_state_file))
+            os.chmod(browser_state_file, 0o600)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            # A missing session only costs a re-login; never fail a search over it.
+            if self.logger:
+                self.logger.debug(f"Could not save browser state: {e!s}")
 
     def goto_url(self: "Marketplace", url: str, attempt: int = 0) -> None:
         try:

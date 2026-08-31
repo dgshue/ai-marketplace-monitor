@@ -339,6 +339,19 @@ class FacebookMarketplace(Marketplace):
                     f"{hilight('[Login]', 'fail')} Could not handle cookie pop-up (or it was not present): {e!s}"
                 )
 
+        # A restored session redirects away from the login form, so the absence
+        # of the email field means we are already signed in. Returning here also
+        # skips the login_wait_time pause -- which is the point of persisting the
+        # session, since that pause exists solely to hand-enter a 2FA code.
+        self.page.wait_for_timeout(1500)
+        if self.page.query_selector('input[name="email"]') is None:
+            if self.logger:
+                self.logger.info(
+                    f"""{hilight("[Login]", "succ")} Reusing saved session, already signed in."""
+                )
+            self.save_browser_state()
+            return
+
         self.config: FacebookMarketplaceConfig
         try:
             if self.config.username:
@@ -376,6 +389,11 @@ class FacebookMarketplace(Marketplace):
                     )
                 )
             doze(login_wait_time, keyboard_monitor=self.keyboard_monitor)
+
+        # Saved after the wait, not before: the cookies that matter are the ones
+        # Facebook issues once 2FA has been satisfied, and those only exist on
+        # the far side of that pause.
+        self.save_browser_state()
 
     def search(
         self: "FacebookMarketplace", item_config: FacebookItemConfig

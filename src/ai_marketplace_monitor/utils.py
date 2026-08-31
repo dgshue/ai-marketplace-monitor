@@ -50,6 +50,18 @@ amm_home.mkdir(parents=True, exist_ok=True)
 
 cache = Cache(amm_home)
 
+# Playwright storage_state (cookies + localStorage) for the marketplace session.
+#
+# Without this the browser is launched non-persistently and every context is
+# blank, so each restart begins logged out and Facebook re-runs 2FA -- an SMS
+# code that has to be typed by hand through the noVNC view, which makes an
+# unattended restart impossible.
+#
+# SENSITIVE: this file is a live logged-in session. Anyone who can read it is
+# you, without needing the password or the second factor. It is written 0600
+# and lives in amm_home alongside the cache.
+browser_state_file = amm_home / "browser-state.json"
+
 
 TConfigType = TypeVar("TConfigType", bound="BaseConfig")
 
