@@ -73,18 +73,50 @@ def _load_index() -> Dict[str, Coordinates]:
         except (KeyError, TypeError, ValueError):
             continue
         state = str(city.get("admin1code") or "").strip().lower()
-        country = str(city.get("countrycode") or "").strip().lower()
-        if state:
-            table.setdefault(f"{name}|{state}", coords)
-            if country:
-                table.setdefault(f"{name}|{country}|{state}", coords)
-        # Bare-name fallback. Duplicated city names across states resolve to
-        # whichever the dataset yields first, so this is only consulted when
-        # the location string carries no state at all.
-        table.setdefault(name, coords)
+
+        # GeoNames punctuates ("St. Louis") where Marketplace usually does not
+        # ("St Louis"), so index a de-punctuated form alongside the original.
+        names = {name}
+        depunctuated = " ".join(name.replace(".", " ").split())
+        if depunctuated:
+            names.add(depunctuated)
+
+        for variant in names:
+            if state:
+                table.setdefault(f"{variant}|{state}", coords)
+            # Bare-name fallback, consulted only when the location string
+            # carries no state at all to disambiguate with.
+            table.setdefault(variant, coords)
 
     _index = table
     return table
+
+
+# Marketplace writes place names the way people type them; GeoNames stores
+# them expanded. Without this, "Mt Pleasant" and "St Louis" simply miss.
+_ABBREVIATIONS = (
+    ("mt ", "mount "),
+    ("st ", "saint "),
+    ("ft ", "fort "),
+    ("n ", "north "),
+    ("s ", "south "),
+    ("e ", "east "),
+    ("w ", "west "),
+)
+
+
+def _name_variants(city: str) -> Tuple[str, ...]:
+    """The name as written, plus an expanded form if it starts with an abbreviation."""
+    cleaned = city.replace(".", " ")
+    cleaned = " ".join(cleaned.split())
+    variants = [city]
+    if cleaned != city:
+        variants.append(cleaned)
+    for short, full in _ABBREVIATIONS:
+        if cleaned.startswith(short):
+            variants.append(full + cleaned[len(short) :])
+            break
+    return tuple(dict.fromkeys(variants))
 
 
 def parse_coordinates(text: str) -> Optional[Coordinates]:
@@ -126,14 +158,23 @@ def resolve(location: str) -> Optional[Coordinates]:
     city = parts[0]
     if len(parts) >= 2:
         state = parts[1]
-        found = table.get(f"{city}|{state}")
+        for name in _name_variants(city):
+            found = table.get(f"{name}|{state}") or table.get(f"{name}|{parts[-1]}")
+            if found:
+                return found
+        # A state was given and nothing matched inside it. Do NOT fall back to
+        # a bare-name lookup: "Mt Pleasant, SC" would then match a Mt Pleasant
+        # on another continent and report a confidently wrong distance
+        # (measured: 2356 mi for a town ~200 mi away). No distance is better.
+        return None
+
+    # No state to disambiguate with, so a bare name is the best available and
+    # duplicates across states resolve to whichever the dataset yields first.
+    for name in _name_variants(city):
+        found = table.get(name)
         if found:
             return found
-        # "Asheboro, North Carolina, US" style -- try the last part as well.
-        found = table.get(f"{city}|{parts[-1]}")
-        if found:
-            return found
-    return table.get(city)
+    return None
 
 
 def haversine_miles(origin: Coordinates, target: Coordinates) -> float:
