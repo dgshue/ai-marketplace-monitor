@@ -22,6 +22,7 @@ from .utils import (
 
 class MarketPlace(Enum):
     FACEBOOK = "facebook"
+    EBAY = "ebay"
 
 
 @dataclass

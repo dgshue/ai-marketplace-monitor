@@ -953,8 +953,16 @@
       // ---- AI evaluation ----
       { key: "ai", label: "AI backends", type: "text", group: "AI evaluation", advanced: true, column: "right",
         help: "Comma-separated [ai.*] names." },
-      { key: "rating", label: "AI rating threshold", type: "text", advanced: true, column: "right",
-        help: "1–5 (or two values: initial, subsequent)." },
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", column: "right",
+        options: [
+          { value: "", label: "Default (3)" },
+          { value: "1", label: "1 — everything, no filtering" },
+          { value: "2", label: "2 — potential match or better" },
+          { value: "3", label: "3 — poor match or better (default)" },
+          { value: "4", label: "4 — good match or better" },
+          { value: "5", label: "5 — great deals only" },
+        ],
+        help: "Default notification threshold for every item. Items can override it." },
       { key: "prompt", label: "AI prompt", type: "textarea", advanced: true, column: "right",
         help: "Custom evaluation prompt (replaces default)." },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", advanced: true, column: "right",
@@ -977,6 +985,54 @@
 
     // ---- Item form ----
     // Matched by prefix "item" — see the lookup logic below.
+    // eBay goes through the official Browse API, so this section is credentials
+    // and search scope -- there is no browser, login, or 2FA to configure.
+    "marketplace.ebay": [
+      { key: "client_id", label: "eBay App ID (Client ID)", type: "text", required: true, column: "left",
+        help: "From an application key set at developer.ebay.com. Use ${EBAY_CLIENT_ID} to read it from the environment." },
+      { key: "client_secret", label: "eBay Cert ID (Client Secret)", type: "password", required: true, column: "left",
+        help: "Use ${EBAY_CLIENT_SECRET} to keep it out of the config file." },
+      { key: "marketplace_id", label: "eBay site", type: "select", column: "left",
+        options: [
+          { value: "", label: "EBAY_US (default)" },
+          { value: "EBAY_GB", label: "EBAY_GB — United Kingdom" },
+          { value: "EBAY_CA", label: "EBAY_CA — Canada" },
+          { value: "EBAY_DE", label: "EBAY_DE — Germany" },
+          { value: "EBAY_AU", label: "EBAY_AU — Australia" },
+        ] },
+      { key: "delivery_country", label: "Ships to", type: "text", column: "left",
+        help: "Two-letter country code, e.g. US. Excludes items that will not ship to you." },
+      { key: "buying_options", label: "Buying options", type: "checkboxes", column: "left",
+        options: [
+          { value: "FIXED_PRICE", label: "Buy It Now" },
+          { value: "AUCTION", label: "Auction" },
+          { value: "BEST_OFFER", label: "Best Offer" },
+        ],
+        help: "Leave empty for all." },
+
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", column: "right",
+        options: [
+          { value: "", label: "Default (3)" },
+          { value: "1", label: "1 — everything, no filtering" },
+          { value: "2", label: "2 — potential match or better" },
+          { value: "3", label: "3 — poor match or better (default)" },
+          { value: "4", label: "4 — good match or better" },
+          { value: "5", label: "5 — great deals only" },
+        ],
+        help: "Default notification threshold for eBay items." },
+      { key: "notify", label: "Notify users", type: "text", column: "right",
+        help: "Comma-separated [user.*] names." },
+      { key: "search_interval", label: "Search interval", type: "text", column: "right",
+        help: "e.g. '30m'. The Browse API allows ~5000 calls/day across the whole app." },
+      { key: "max_search_interval", label: "Max search interval", type: "text", column: "right", advanced: true },
+      { key: "min_price", label: "Min price", type: "text", group: "Pricing", column: "right", advanced: true },
+      { key: "max_price", label: "Max price", type: "text", column: "right", advanced: true },
+      { key: "ai", label: "AI backends", type: "text", group: "AI evaluation", column: "right", advanced: true },
+      { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
+      { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
+      { key: "enabled", label: "Enabled", type: "checkbox", group: "Status", column: "right" },
+    ],
+
     "item.*": [
       // Left: item-specific
       { key: "search_phrases", label: "Search phrases", type: "text", required: true, column: "left",
@@ -1032,8 +1088,16 @@
       { key: "notify", label: "Notify users", type: "text", column: "right", advanced: true,
         help: "Comma-separated [user.*] names. Default: inherit from marketplace." },
       { key: "ai", label: "AI backends", type: "text", group: "AI", column: "right", advanced: true },
-      { key: "rating", label: "AI rating threshold", type: "text", column: "right", advanced: true,
-        help: "1–5 (or initial,subsequent)." },
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", column: "right",
+        options: [
+          { value: "", label: "Inherit from marketplace (default 3)" },
+          { value: "1", label: "1 — everything, no filtering" },
+          { value: "2", label: "2 — potential match or better" },
+          { value: "3", label: "3 — poor match or better (default)" },
+          { value: "4", label: "4 — good match or better" },
+          { value: "5", label: "5 — great deals only" },
+        ],
+        help: "The notification threshold. Listings the AI scores below this are logged and shown in Activity as dismissed, but never notified." },
       { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
       { key: "rating_prompt", label: "Rating prompt", type: "textarea", column: "right", advanced: true },

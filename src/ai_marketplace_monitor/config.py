@@ -19,6 +19,7 @@ from .ai import (
     OpenAIBackend,
     TAIConfig,
 )
+from .ebay import EbayMarketplace
 from .facebook import FacebookMarketplace
 from .marketplace import TItemConfig, TMarketplaceConfig
 from .notification import NotificationConfig
@@ -26,7 +27,7 @@ from .region import RegionConfig
 from .user import User, UserConfig
 from .utils import MonitorConfig, Translator, hilight, merge_dicts
 
-supported_marketplaces = {"facebook": FacebookMarketplace}
+supported_marketplaces = {"facebook": FacebookMarketplace, "ebay": EbayMarketplace}
 supported_ai_backends = {
     "deepseek": DeepSeekBackend,
     "gemini": GeminiBackend,
@@ -142,12 +143,22 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
         # check for required fields in each marketplace
         self.marketplace = {}
         for marketplace_name, marketplace_config in config["marketplace"].items():
-            market_type = marketplace_config.get("market_type", "facebook")
+            # A section named after a supported marketplace implies its type, so
+            # [marketplace.ebay] needs no market_type line. Anything else still
+            # defaults to facebook, which is what every pre-existing config with
+            # a custom section name relies on.
+            default_type = (
+                marketplace_name if marketplace_name in supported_marketplaces else "facebook"
+            )
+            market_type = marketplace_config.get("market_type", default_type)
             if market_type not in supported_marketplaces:
                 raise ValueError(
                     f"Marketplace {hilight(market_type)} is not supported. Supported marketplaces are: {supported_marketplaces.keys()}"
                 )
             marketplace_class = supported_marketplaces[market_type]
+            # Resolved rather than passed through: market_type is what selects
+            # the class again at search time, so it must not stay unset.
+            marketplace_config = {**marketplace_config, "market_type": market_type}
             self.marketplace[marketplace_name] = marketplace_class.get_config(
                 name=marketplace_name, monitor_config=self.monitor, **marketplace_config
             )
@@ -185,8 +196,17 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
                     )
 
             for marketplace_name, markerplace_config in config["marketplace"].items():
+                # Same section-name inference as get_marketplace_config, so an
+                # item under [marketplace.ebay] is built by the eBay class.
                 marketplace_class = supported_marketplaces[
-                    markerplace_config.get("market_type", "facebook")
+                    markerplace_config.get(
+                        "market_type",
+                        (
+                            marketplace_name
+                            if marketplace_name in supported_marketplaces
+                            else "facebook"
+                        ),
+                    )
                 ]
                 if (
                     "marketplace" not in item_config

@@ -332,7 +332,7 @@ class MarketplaceMonitor:
         for marketplace_config in self.config.marketplace.values():
             if marketplace_config.enabled is False:
                 continue
-            marketplace_class = supported_marketplaces[marketplace_config.name]
+            marketplace_class = supported_marketplaces[marketplace_config.market_type or marketplace_config.name]
             if marketplace_config.name in self.active_marketplaces:
                 marketplace = self.active_marketplaces[marketplace_config.name]
             else:
@@ -650,7 +650,7 @@ class MarketplaceMonitor:
             for marketplace_config in self.config.marketplace.values():
                 if marketplace_config.enabled is False:
                     continue
-                marketplace_class = supported_marketplaces[marketplace_config.name]
+                marketplace_class = supported_marketplaces[marketplace_config.market_type or marketplace_config.name]
                 if marketplace_config.name in self.active_marketplaces:
                     marketplace = self.active_marketplaces[marketplace_config.name]
                 else:
