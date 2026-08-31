@@ -993,7 +993,7 @@
       // ---- AI evaluation ----
       { key: "ai", label: "AI backends", type: "text", group: "AI evaluation", advanced: true, column: "right",
         help: "Comma-separated [ai.*] names." },
-      { key: "rating", label: "Notify at AI rating ≥", type: "select", column: "right",
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right",
         options: [
           { value: "", label: "Default (3)" },
           { value: "1", label: "1 — everything, no filtering" },
@@ -1050,7 +1050,7 @@
         ],
         help: "Leave empty for all." },
 
-      { key: "rating", label: "Notify at AI rating ≥", type: "select", column: "right",
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right",
         options: [
           { value: "", label: "Default (3)" },
           { value: "1", label: "1 — everything, no filtering" },
@@ -1128,7 +1128,7 @@
       { key: "notify", label: "Notify users", type: "text", column: "right", advanced: true,
         help: "Comma-separated [user.*] names. Default: inherit from marketplace." },
       { key: "ai", label: "AI backends", type: "text", group: "AI", column: "right", advanced: true },
-      { key: "rating", label: "Notify at AI rating ≥", type: "select", column: "right",
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right",
         options: [
           { value: "", label: "Inherit from marketplace (default 3)" },
           { value: "1", label: "1 — everything, no filtering" },
@@ -1197,8 +1197,18 @@
     if (FORM_SCHEMAS[sectionName]) return FORM_SCHEMAS[sectionName];
     const dot = sectionName.indexOf(".");
     if (dot >= 0) {
-      const wildcard = sectionName.slice(0, dot) + ".*";
+      const prefix = sectionName.slice(0, dot);
+      const wildcard = prefix + ".*";
       if (FORM_SCHEMAS[wildcard]) return FORM_SCHEMAS[wildcard];
+      if (prefix === "marketplace") {
+        // A marketplace section under any name still has a concrete type:
+        // its market_type key, else facebook (mirroring the backend's
+        // section-name inference). A renamed section must not lose its form.
+        const section = state.sections.find((x) => x.name === sectionName);
+        const fields = section ? fieldsForSection(section) : {};
+        const kind = String(fields.market_type || "facebook").toLowerCase();
+        return FORM_SCHEMAS["marketplace." + kind] || FORM_SCHEMAS["marketplace.facebook"];
+      }
     }
     return null;
   };
@@ -1260,7 +1270,8 @@
     } else {
       nameWrapper.innerHTML =
         `<label class="form-label">Section name <span class="required">*</span></label>` +
-        `<input type="text" id="add-section-name" value="${esc(currentSuffix)}" ` +
+        `<input type="text" id="add-section-name" name="aimm_section_name" ` +
+        `autocomplete="off" value="${esc(currentSuffix)}" ` +
         `placeholder="e.g. gopro, me" />` +
         `<p class="form-help">[${esc(currentPrefix)}.<em>name</em>]</p>`;
       const nameInput = nameWrapper.querySelector("input");
@@ -1399,7 +1410,13 @@
         }
       }
       if (fieldDef.type !== "checkboxes") {
-        input.name = fieldDef.key;
+        // Prefixed name + explicit autocomplete: with name="username" beside
+        // name="password", Chrome decides this is a login form and autofills
+        // saved site credentials into it — which is how a user's web UI
+        // password ended up renaming a config section. new-password is the
+        // one value password managers reliably leave alone.
+        input.name = "aimm_" + fieldDef.key;
+        input.autocomplete = fieldDef.type === "password" ? "new-password" : "off";
         input.dataset.key = fieldDef.key;
         label.htmlFor = fieldDef.key;
         input.id = "field-" + fieldDef.key;
@@ -1472,6 +1489,11 @@
       // Type coercion.
       let value;
       if (fieldDef.type === "number" && newVal) {
+        value = parseInt(newVal, 10);
+        if (isNaN(value)) { errors.push(`${fieldDef.label} must be a number.`); return; }
+      } else if (fieldDef.coerce === "int" && newVal) {
+        // Selects yield strings; a rating written as "4" fails the config
+        // validator, which wants an integer. Coerce explicitly-marked fields.
         value = parseInt(newVal, 10);
         if (isNaN(value)) { errors.push(`${fieldDef.label} must be a number.`); return; }
       } else if (newVal.includes(",") && fieldDef.type === "text") {
@@ -1864,13 +1886,30 @@
   // Write one key straight into the buffer the TOML tab shows. Same
   // tomlEdit.edit() the section modal uses, so comments and formatting survive
   // and Save behaves identically no matter which control produced the change.
+  // Deleting a key is line surgery, not tomlEdit.edit: TOML has no null, so
+  // there is nothing to "set" a cleared value to.
+  const removeKeyFromSection = (sectionName, key) => {
+    const lines = editor.getValue().split("\n");
+    const section = scanSectionsClient(lines.join("\n")).find((x) => x.name === sectionName);
+    if (!section) return null;
+    const keyRe = new RegExp("^\\s*" + key + "\\s*=");
+    const kept = lines.filter(
+      (line, i) => !(i > section.line_start && i < section.line_end && keyRe.test(line))
+    );
+    return kept.join("\n");
+  };
+
   const applyInline = (sectionName, key, value) => {
     if (!window.tomlEdit) {
       setEditorStatus("TOML editor library failed to load — use the TOML tab.", "error");
       return false;
     }
     try {
-      const next = window.tomlEdit.edit(editor.getValue(), `${sectionName}.${key}`, value);
+      const next =
+        value === null
+          ? removeKeyFromSection(sectionName, key)
+          : window.tomlEdit.edit(editor.getValue(), `${sectionName}.${key}`, value);
+      if (next === null) return false;
       editor.setValue(next);
       state.currentContent = next;
       // setValue fires CodeMirror's change handler, but call these directly
@@ -1943,7 +1982,19 @@
         <span class="inline-label">Notify at rating</span>
         <span class="thr">${thrButtons}</span>
         <span class="thr-note">${
-          threshold ? `≥ ${threshold} — ${THRESHOLD_WORDS[threshold]}` : "inherited from marketplace"
+          threshold
+            ? `≥ ${threshold} — ${THRESHOLD_WORDS[threshold]}`
+            : (() => {
+                // Surface the value being inherited; "inherited" alone reads
+                // as "unknown", which is what made this control confusing.
+                let inherited = 3;
+                for (const mk of state.sections.filter((x) => x.prefix === "marketplace")) {
+                  let r = fieldsForSection(mk).rating;
+                  if (Array.isArray(r)) r = r[r.length - 1];
+                  if (typeof r === "number") inherited = r;
+                }
+                return `inherited from marketplace (≥ ${inherited} — ${THRESHOLD_WORDS[inherited]})`;
+              })()
         }</span>
         ${helpBlock("threshold")}
       </div>
@@ -2186,7 +2237,7 @@
     verdict: "",
     item: "",
     filter: "",
-    expanded: new Set(),
+    selected: null, // rowKey of the listing shown in the detail pane
     reloadTimer: null,
     loading: false,
   };
@@ -2273,6 +2324,45 @@
     });
   };
 
+  const renderDealDetail = (row) => {
+    const host = $("#deal-detail");
+    if (!host) return;
+    if (!row) {
+      host.innerHTML =
+        '<div class="dd-empty">Select a listing to read the AI\u2019s reasoning.</div>';
+      return;
+    }
+    const scoreClass = row.score >= 4 ? "score-high" : row.score === 3 ? "score-mid" : "";
+    const badge =
+      row.verdict === "dismissed"
+        ? '<span class="verdict-badge">dismissed</span>'
+        : `<span class="verdict-badge ${row.verdict}">${row.verdict}</span>`;
+    host.innerHTML = `
+      <h2>${esc(row.title)}</h2>
+      <div class="dd-sub">
+        <span class="score-badge ${scoreClass}">${row.score}/5 ${esc(row.conclusion)}</span>
+        ${badge}
+        <span>${esc(row.marketplace)}</span>
+        <span>${esc(row.item)}</span>
+        ${row.notified_at ? `<span>notified ${esc(row.notified_at)}</span>` : ""}
+      </div>
+      <div class="dd-price">${esc(row.price)}${
+        row.distance_mi != null ? `<span class="dist">${row.distance_mi} mi away</span>` : ""
+      }</div>
+      <div class="dd-kv">
+        ${row.location ? `<span class="k">Location</span><span>${esc(row.location)}</span>` : ""}
+        ${row.condition ? `<span class="k">Condition</span><span>${esc(row.condition)}</span>` : ""}
+        ${row.seller ? `<span class="k">Seller</span><span>${esc(row.seller)}</span>` : ""}
+        <span class="k">Threshold</span><span>notify at \u2265 ${row.threshold}</span>
+      </div>
+      <div class="dd-ai"><div class="h">Why the AI scored it ${row.score}/5${
+        row.ai_name ? " \u00B7 " + esc(row.ai_name) : ""
+      }</div>${esc(row.comment || "(no reasoning recorded)")}</div>
+      <div class="dd-actions">
+        ${row.url ? `<a class="primary" href="${esc(row.url)}" target="_blank" rel="noopener">Open listing \u2197</a>` : ""}
+      </div>`;
+  };
+
   const renderActivity = () => {
     renderActivitySummary();
     const host = $("#activity-rows");
@@ -2292,56 +2382,41 @@
           ? "No listings match these filters."
           : "Nothing rated yet. Listings appear here once the AI has scored them."
       }</div>`;
+      renderDealDetail(null);
       return;
+    }
+
+    // Keep the selection while it remains visible; otherwise fall back to the
+    // top row, so the detail pane is never showing a filtered-out listing.
+    let selectedRow = rows.find((r) => rowKey(r) === activity.selected);
+    if (!selectedRow) {
+      selectedRow = rows[0];
+      activity.selected = rowKey(selectedRow);
     }
 
     host.innerHTML = rows
       .map((row) => {
         const key = rowKey(row);
-        const open = activity.expanded.has(key);
         const scoreClass =
           row.score >= 4 ? "score-high" : row.score === 3 ? "score-mid" : "";
-        const badge =
-          row.verdict === "dismissed"
-            ? ""
-            : `<span class="verdict-badge ${row.verdict}">${row.verdict}</span>`;
-        const detail = open
-          ? `<div class="activity-row-detail">${esc(row.comment)}${
-              row.url
-                ? `\n\n<a href="${esc(row.url)}" target="_blank" rel="noopener">Open on ${esc(
-                    row.marketplace
-                  )} ↗</a>`
-                : ""
-            }</div>`
-          : "";
         return `
-        <div class="activity-row verdict-${row.verdict}" data-key="${esc(key)}">
-          <div class="activity-row-head">
-            <span class="score-badge ${scoreClass}" title="${esc(
-          row.conclusion
-        )} (threshold ${row.threshold})">${row.score}/5</span>
-            <span class="title" title="${esc(row.title)}">${esc(row.title)}</span>
-            ${badge}
-            <span class="price">${esc(row.price)}</span>
+        <div class="dli verdict-${row.verdict} ${key === activity.selected ? "sel" : ""}" data-key="${esc(key)}">
+          <div class="top">
+            <span class="score-badge ${scoreClass}">${row.score}</span>
+            <span class="t" title="${esc(row.title)}">${esc(row.title)}</span>
+            <span class="p">${esc(row.price)}</span>
           </div>
-          <div class="activity-row-meta">
+          <div class="m">
             <span>${esc(row.item)}</span>
-            ${
-              row.location
-                ? `<span>${esc(row.location)}${
-                    row.distance_mi != null
-                      ? ` <span class="distance">· ${row.distance_mi} mi</span>`
-                      : ""
-                  }</span>`
-                : ""
-            }
-            ${row.condition ? `<span>${esc(row.condition)}</span>` : ""}
-            <span>${esc(row.conclusion)}</span>
+            <span>${esc(row.marketplace)}</span>
+            ${row.distance_mi != null ? `<span>${row.distance_mi} mi</span>` : ""}
+            ${row.location ? `<span>${esc(row.location)}</span>` : ""}
           </div>
-          ${detail}
         </div>`;
       })
       .join("");
+
+    renderDealDetail(selectedRow);
   };
 
   // ---------------------------------------------------------------
@@ -2644,13 +2719,9 @@
   const activityRowsHost = $("#activity-rows");
   if (activityRowsHost) {
     activityRowsHost.addEventListener("click", (e) => {
-      // Let the "open listing" link work without also toggling the row shut.
-      if (e.target.closest("a")) return;
-      const row = e.target.closest(".activity-row");
+      const row = e.target.closest(".dli");
       if (!row) return;
-      const key = row.dataset.key;
-      if (activity.expanded.has(key)) activity.expanded.delete(key);
-      else activity.expanded.add(key);
+      activity.selected = row.dataset.key;
       renderActivity();
     });
   }
