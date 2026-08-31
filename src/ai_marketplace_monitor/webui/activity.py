@@ -34,6 +34,7 @@ from diskcache import Cache  # type: ignore
 
 from ..listing import Listing
 from ..utils import CacheType
+from .geo import Coordinates, distance_from, resolve
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -118,6 +119,29 @@ def thresholds_from_config(config_files: Iterable[Path]) -> Tuple[Dict[str, int]
     return per_item, fallback
 
 
+def home_from_config(config_files: Iterable[Path]) -> Optional[Coordinates]:
+    """Resolve `home_location` from any [marketplace.*] section, if set."""
+    for path in config_files:
+        try:
+            with open(path, "rb") as handle:
+                data = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        marketplaces = data.get("marketplace")
+        if not isinstance(marketplaces, dict):
+            continue
+        for section in marketplaces.values():
+            if not isinstance(section, dict):
+                continue
+            home = section.get("home_location")
+            if isinstance(home, str) and home.strip():
+                found = resolve(home)
+                if found:
+                    return found
+                logger.debug("home_location %r did not resolve", home)
+    return None
+
+
 def _collect_ratings(local_cache: Cache) -> Dict[str, Dict[str, Any]]:
     """listing_hash -> {score, comment, name} for every AI evaluation on record."""
     ratings: Dict[str, Dict[str, Any]] = {}
@@ -184,7 +208,9 @@ def build_activity(
     limit: int = 500,
 ) -> Dict[str, Any]:
     """Join the cache into per-listing review rows plus per-item totals."""
+    config_files = list(config_files)
     per_item_threshold, default_threshold = thresholds_from_config(config_files)
+    home = home_from_config(config_files)
     ratings = _collect_ratings(local_cache)
     notified = _collect_notified(local_cache)
 
@@ -244,6 +270,7 @@ def build_activity(
                     "title": listing.title,
                     "price": listing.price,
                     "location": listing.location,
+                    "distance_mi": distance_from(home, listing.location or ""),
                     "seller": listing.seller,
                     "condition": listing.condition,
                     "url": listing.post_url,

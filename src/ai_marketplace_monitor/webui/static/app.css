@@ -993,3 +993,7 @@ html, body {
   color: var(--warn);
   margin-top: 6px;
 }
+
+/* Distance to the listing, shown beside its location. Absent when the
+   location could not be geocoded -- no distance beats a wrong one. */
+.activity-row-meta .distance { color: var(--accent); }

@@ -2005,7 +2005,15 @@
           </div>
           <div class="activity-row-meta">
             <span>${esc(row.item)}</span>
-            ${row.location ? `<span>${esc(row.location)}</span>` : ""}
+            ${
+              row.location
+                ? `<span>${esc(row.location)}${
+                    row.distance_mi != null
+                      ? ` <span class="distance">· ${row.distance_mi} mi</span>`
+                      : ""
+                  }</span>`
+                : ""
+            }
             ${row.condition ? `<span>${esc(row.condition)}</span>` : ""}
             <span>${esc(row.conclusion)}</span>
           </div>

@@ -371,6 +371,11 @@ class MarketplaceConfig(MarketItemCommonConfig):
     market_type: str | None = MarketPlace.FACEBOOK.value
     language: str | None = None
     monitor_config: MonitorConfig | None = None
+    # Where "you" are, for the distance shown next to each listing in the web
+    # UI's activity view. `search_city` cannot serve this: Facebook expects its
+    # own city slug or a numeric place id, neither of which geocodes.
+    # Accepts "City, ST" or a bare "lat, lon" pair.
+    home_location: str | None = None
 
     def handle_market_type(self: "MarketplaceConfig") -> None:
         if self.market_type is None:
@@ -381,6 +386,15 @@ class MarketplaceConfig(MarketItemCommonConfig):
             raise ValueError(
                 f"Marketplace {hilight(self.market_type)} market must be {MarketPlace.FACEBOOK.value}."
             )
+
+    def handle_home_location(self: "MarketplaceConfig") -> None:
+        if self.home_location is None:
+            return
+        if not isinstance(self.home_location, str) or not self.home_location.strip():
+            raise ValueError(
+                f"Marketplace {hilight(self.name)} home_location must be a non-empty string."
+            )
+        self.home_location = self.home_location.strip()
 
     def handle_language(self: "MarketplaceConfig") -> None:
         if self.language is None:
