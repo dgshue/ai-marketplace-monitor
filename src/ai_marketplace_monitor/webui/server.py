@@ -424,7 +424,14 @@ def create_app(
                 if not session or sessions.validate(session) is None:
                     await websocket.close(code=4401)
                     return
-            await websocket.accept(subprotocol="binary")
+            # noVNC >= 1.2 calls `new WebSocket(url, [])` and so offers no
+            # subprotocol. RFC 6455 requires the client to fail the connection
+            # if the server answers with one it did not offer, so replying
+            # "binary" makes every handshake fail -- the browser view shows
+            # "Failed to connect to server" with nothing logged server-side.
+            # The Dockerfile installs novnc from Debian bookworm, which is
+            # 1.3.0, so this affects the image as shipped.
+            await websocket.accept()
             try:
                 reader, writer = await asyncio.open_connection(vnc_host, vnc_port)
             except OSError:
