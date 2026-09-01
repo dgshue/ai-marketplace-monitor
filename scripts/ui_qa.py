@@ -585,9 +585,10 @@ with sync_playwright() as p:
     # absent. Browser mode needs no keys, so a real config may well already
     # have [marketplace.ebay] on disk -- drop it from the buffer and save, and
     # let the snapshot restore at the end of the block put it back.
-    if "marketplace.ebay" in pg.eval_on_selector_all(
-        "[data-edit-section]", "e=>e.map(x=>x.dataset.editSection)"
-    ):
+    def drop_ebay_section():
+        """Free the eBay section name so the Set-up card is offered again."""
+        if not pg.query_selector("[data-edit-section='marketplace.ebay']"):
+            return
         pg.evaluate(
             """() => {
               const cm = document.querySelector('.CodeMirror').CodeMirror;
@@ -605,11 +606,13 @@ with sync_playwright() as p:
         if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
             pg.click("#save-btn")
             pg.wait_for_timeout(1500)
-        check(
-            "configured ebay temporarily removed for the add-path test",
-            not pg.query_selector("[data-edit-section='marketplace.ebay']"),
-            pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
-        )
+
+    drop_ebay_section()
+    check(
+        "ebay section name free for the add-path test",
+        not pg.query_selector("[data-edit-section='marketplace.ebay']"),
+        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
+    )
     avail = pg.eval_on_selector_all(
         ".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)"
     )
@@ -680,6 +683,8 @@ with sync_playwright() as p:
     if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
         pg.click("#save-btn")
         pg.wait_for_timeout(1500)
+    # ...and the snapshot may itself carry an eBay section.
+    drop_ebay_section()
 
     # --- the same add WITH credentials still works, and stays enabled too ---
     pg.click(".set.avail [data-setup-marketplace='ebay']")
