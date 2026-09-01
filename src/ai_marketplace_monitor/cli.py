@@ -205,6 +205,11 @@ def main(
         "httpcore.connection",
         "httpcore.http11",
         "httpx",
+        # doze() watches amm_home, the directory that also holds this log
+        # file. At DEBUG, watchdog logs every inotify event, each log line is
+        # itself a modification of the watched directory, and the loop fills
+        # the log and all its rotations with "in-event <InotifyEvent ...>".
+        "watchdog",
     ):
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
