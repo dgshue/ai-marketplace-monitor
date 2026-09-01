@@ -95,6 +95,22 @@ with sync_playwright() as p:
     pg.wait_for_timeout(500)
     check("pill toggles back to All", pg.eval_on_selector("#activity-summary .ipill[data-item-pill='']", "e=>e.classList.contains('on')"))
 
+    # --- paused items: out of the All view, reachable via their dimmed pill ---
+    paused = pg.eval_on_selector_all("#activity-summary .ipill.paused", "e=>e.map(x=>x.dataset.itemPill)")
+    if paused:
+        hidden_ok = pg.evaluate(
+            "(names) => !Array.from(document.querySelectorAll('.dli .m span:first-child')).some(x => names.includes(x.textContent))",
+            paused)
+        check("paused items absent from All", hidden_ok, paused)
+        pg.click(f"#activity-summary .ipill[data-item-pill='{paused[0]}']")
+        pg.wait_for_timeout(500)
+        shown = pg.eval_on_selector_all(".dli", "e=>e.length")
+        check("paused pill shows its history", shown > 0, f"{paused[0]}: {shown} rows")
+        pg.click(f"#activity-summary .ipill[data-item-pill='{paused[0]}']")
+        pg.wait_for_timeout(400)
+    else:
+        check("paused pills (none configured)", True, "no paused items on disk")
+
     pg.fill("#activity-filter", "3090")
     pg.wait_for_timeout(400)
     check("text filter", pg.eval_on_selector_all(".dli", "e=>e.length") > 0)

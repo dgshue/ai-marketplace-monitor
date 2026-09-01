@@ -79,7 +79,9 @@ def _rating_floor(value: Any) -> Optional[int]:
     return None
 
 
-def thresholds_from_config(config_files: Iterable[Path]) -> Tuple[Dict[str, int], int]:
+def thresholds_from_config(
+    config_files: Iterable[Path],
+) -> Tuple[Dict[str, int], int, set]:
     """Return (threshold per item name, marketplace-wide default).
 
     Every configured item gets an entry, not only those that set `rating` --
@@ -92,6 +94,7 @@ def thresholds_from_config(config_files: Iterable[Path]) -> Tuple[Dict[str, int]
     """
     per_item: Dict[str, int] = {}
     explicit: Dict[str, int] = {}
+    disabled: set = set()
     fallback = DEFAULT_THRESHOLD
     for path in config_files:
         try:
@@ -114,9 +117,11 @@ def thresholds_from_config(config_files: Iterable[Path]) -> Tuple[Dict[str, int]
                     floor = _rating_floor(section.get("rating"))
                     if floor is not None:
                         explicit[str(name)] = floor
+                    if section.get("enabled") is False:
+                        disabled.add(str(name))
     for name in per_item:
         per_item[name] = explicit.get(name, fallback)
-    return per_item, fallback
+    return per_item, fallback, disabled
 
 
 def home_from_config(config_files: Iterable[Path]) -> Optional[Coordinates]:
@@ -228,7 +233,7 @@ def build_activity(
 ) -> Dict[str, Any]:
     """Join the cache into per-listing review rows plus per-item totals."""
     config_files = list(config_files)
-    per_item_threshold, default_threshold = thresholds_from_config(config_files)
+    per_item_threshold, default_threshold, disabled_items = thresholds_from_config(config_files)
     home = home_from_config(config_files)
     ratings = _collect_ratings(local_cache)
     notified = _collect_notified(local_cache)
@@ -302,6 +307,10 @@ def build_activity(
                     "verdict": verdict,
                     "notified_at": notified.get((listing.marketplace, listing.id), ""),
                     # The user's own read on the listing, orthogonal to the AI's.
+                    # False when the item is paused OR no longer in the config
+                    # at all — either way it is off the active radar, and the
+                    # default Deals view hides it while keeping it reachable.
+                    "item_active": item in per_item_threshold and item not in disabled_items,
                     "my_rank": user_flags.get((listing.marketplace, listing.id), {}).get("my_rank"),
                     "hidden": bool(
                         user_flags.get((listing.marketplace, listing.id), {}).get("hidden")
@@ -324,6 +333,7 @@ def build_activity(
                 "notified": 0,
                 "threshold": row["threshold"],
                 "best_score": 0,
+                "active": row["item_active"],
             },
         )
         bucket["examined"] += 1

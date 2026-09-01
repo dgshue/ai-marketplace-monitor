@@ -2558,16 +2558,26 @@
       host.innerHTML = "";
       return;
     }
-    const pills = activity.summary
+    const ordered = activity.summary
+      .slice()
+      .sort((a, b) => Number(b.active !== false) - Number(a.active !== false));
+    const pills = ordered
       .map((s) => {
         const active = activity.item === s.item;
-        const tip = `${s.item}: ${s.examined} examined · ${s.promising} promising · ${s.notified} notified · ${s.dismissed} dismissed`;
+        const paused = s.active === false;
+        const tip =
+          `${s.item}: ${s.examined} examined · ${s.promising} promising · ` +
+          `${s.notified} notified · ${s.dismissed} dismissed` +
+          (paused ? " · paused — click to view its history" : "");
         return `
-        <button class="ipill ${active ? "on" : ""}" data-item-pill="${esc(s.item)}" title="${esc(tip)}">
+        <button class="ipill ${active ? "on" : ""} ${paused ? "paused" : ""}" data-item-pill="${esc(
+          s.item
+        )}" title="${esc(tip)}">
           <span class="n">${esc(s.item)}</span>
           <span class="c">${s.examined}</span>
           ${s.promising ? `<span class="c warn">${s.promising}★</span>` : ""}
           ${s.notified ? `<span class="c ok">${s.notified}✓</span>` : ""}
+          ${paused ? '<span class="c">⏸</span>' : ""}
         </button>`;
       })
       .join("");
@@ -2587,6 +2597,9 @@
         if (activity.verdict && row.verdict !== activity.verdict) return false;
       }
       if (activity.item && row.item !== activity.item) return false;
+      // Paused or since-removed items stay tracked but leave the default view.
+      // Picking their pill is the explicit ask to see that history.
+      if (!activity.item && row.item_active === false) return false;
       if (!needle) return true;
       return (
         (row.title || "").toLowerCase().includes(needle) ||

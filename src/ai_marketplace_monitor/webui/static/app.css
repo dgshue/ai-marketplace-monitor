@@ -1640,3 +1640,5 @@ table.status-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ipill.on .c.ok, .ipill.on .c.warn { color: #fff; }
 
 .set.avail { border-style: dashed; }
+.ipill.paused { opacity: 0.55; }
+.ipill.paused.on { opacity: 1; }
