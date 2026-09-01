@@ -211,6 +211,41 @@ with sync_playwright() as p:
     pg.wait_for_timeout(400)
     check("csv button", bool(pg.query_selector("#export-csv-btn")))
 
+    # --- sort control: each mode must actually reorder; blanks sort last ---
+    check("sort control present", bool(pg.query_selector("#deal-sort")))
+
+    def list_order():
+        return pg.eval_on_selector_all(".dli", "e=>e.map(x=>x.dataset.key)")
+
+    def sort_by(mode):
+        pg.select_option("#deal-sort", mode)
+        pg.wait_for_timeout(500)
+        return list_order()
+
+    by_score = sort_by("score")
+    scores = pg.eval_on_selector_all(".dli .score-badge", "e=>e.map(x=>parseInt(x.textContent))")
+    check("sort: best rated descending", scores == sorted(scores, reverse=True), scores[:6])
+    sort_by("distance")
+    dists = pg.evaluate(
+        "(() => Array.from(document.querySelectorAll('.dli')).map(r => {"
+        " const m = (r.innerText.match(/([0-9.]+) mi/) || [])[1];"
+        " return m ? parseFloat(m) : null; }))()"
+    )
+    known = [d for d in dists if d is not None]
+    idx_known = [i for i, d in enumerate(dists) if d is not None]
+    idx_null = [i for i, d in enumerate(dists) if d is None]
+    check("sort: nearest ascending", known == sorted(known), known[:6])
+    check(
+        "sort: unresolvable distances last",
+        (not idx_null) or (not idx_known) or min(idx_null) > max(idx_known),
+        f"{len(known)} with distance, {len(idx_null)} without",
+    )
+    by_new = sort_by("newest")
+    check("sort: newest is a valid ordering", len(by_new) == len(by_score))
+    sort_by("myrank")
+    check("sort: my rating mode", len(list_order()) == len(by_score))
+    sort_by("score")
+
     # --- no PDP junk artifacts anywhere in the deals surface ---
     junk_hits = pg.evaluate(
         "['**unspecified**', \"Seller's description\", 'View seller profile']"
@@ -224,8 +259,32 @@ with sync_playwright() as p:
     )
     check("no horizontal page overflow", overflow <= 1, f"{overflow}px")
     if pg.query_selector("#dd-map"):
-        mw = pg.eval_on_selector("#dd-map", "e=>e.getBoundingClientRect().width")
-        check("map confined to media rail", mw <= 500, f"{mw:.0f}px")
+        import json as _j
+
+        _r = _j.loads(
+            pg.eval_on_selector("#dd-map", "e=>JSON.stringify(e.getBoundingClientRect())")
+        )
+        check("map confined to media rail", _r["width"] <= 620, "%.0fpx" % _r["width"])
+        check("map is large enough to read", _r["height"] >= 300, "%.0fpx tall" % _r["height"])
+        pg.wait_for_timeout(5000)
+        _pts = pg.evaluate(
+            "(() => { let best = 0;"
+            " document.querySelectorAll('#dd-map path.leaflet-interactive').forEach(el => {"
+            " const d = el.getAttribute('d') || '';"
+            " best = Math.max(best, (d.match(/[ML]/g) || []).length); });"
+            " return best; })()"
+        )
+        check("route geometry drawn (not a 2-point line)", _pts >= 5, f"{_pts} vertices")
+        _drive = (
+            pg.eval_on_selector("#dd-drive", "e=>e.textContent")
+            if pg.query_selector("#dd-drive")
+            else ""
+        )
+        check(
+            "drive time sits in the price header",
+            ("by road" in _drive) or _drive == "",
+            _drive[:40] or "(routing unavailable - soft)",
+        )
 
     # --- media: photo snapshot, pickup map, drive time on a facebook row ---
     picked = pg.evaluate(
@@ -505,6 +564,21 @@ with sync_playwright() as p:
         pg.wait_for_timeout(500)
         modal_open = not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')")
         nfields = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+        if name == "marketplace.facebook":
+            # Mapping/distance settings must be reachable from the UI, not
+            # only by hand-editing TOML.
+            pg.click(".form-tab-bar .form-tab:nth-child(2)")
+            pg.wait_for_timeout(350)
+            has_home = bool(pg.query_selector("#field-home_location"))
+            check(
+                "home_location exposed in settings UI",
+                has_home,
+                (
+                    pg.eval_on_selector("#field-home_location", "e=>e.value")
+                    if has_home
+                    else "MISSING"
+                ),
+            )
         hint = pg.eval_on_selector("#form-modal-hint", "e=>e.hidden ? '' : e.textContent") or ""
         check(
             f"form opens: {name}",

@@ -1710,3 +1710,28 @@ table.status-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 @media (max-width: 920px) {
   .deals-split { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Bigger map: it is the reason the media rail exists, and a route is
+   unreadable at postcard size. The rail widens to match. */
+.dd-cols { grid-template-columns: minmax(0, 1fr) 440px; }
+.dd-side .dd-map { height: 420px; }
+.dd-side .dd-photo { max-height: 260px; }
+
+/* Road time sits with the price and straight-line distance, not orphaned
+   below the map. */
+.dd-price .drive {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-dim);
+  margin-left: 10px;
+}
+
+.dd-price .drive:not(:empty)::before {
+  content: "≈ ";
+}
+
+@media (max-width: 1180px) {
+  .dd-cols { grid-template-columns: minmax(0, 1fr); }
+  .dd-side { max-width: 560px; }
+  .dd-side .dd-map { height: 340px; }
+}

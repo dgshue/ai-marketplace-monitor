@@ -934,6 +934,8 @@
         help: "Non-English Facebook locale — must match a [translation.*] section." },
 
       // ---- Right column: Shared — can be overridden per-item ----
+      { key: "home_location", label: "Your location (for distance & maps)", type: "text", column: "right",
+        help: "Where you are, e.g. 'Asheboro, NC' or a bare 'lat, lon'. Drives the distance shown on every listing, the pickup map, and the drive-time estimate. Separate from search city, which is Facebook's own place id and does not geocode." },
       { key: "search_city", label: "Search city", type: "text", required: true, keepString: true, column: "right",
         help: "City code from the Facebook Marketplace URL (lowercase, e.g. 'houston')." },
       { key: "search_region", label: "Search region", type: "select", column: "right",
@@ -2196,7 +2198,10 @@
       let dot = "ok";
       let detail = "";
       if (kind === "facebook") {
-        if (fb.logged_in) detail = "signed in · session saved";
+        const homeTxt = f.home_location
+          ? " · home " + f.home_location
+          : " · no home set — distances and maps are off";
+        if (fb.logged_in) detail = "signed in" + homeTxt;
         else if (fb.exists) { dot = "warn"; detail = "anonymous session — log in via the Browser view"; }
         else { dot = "warn"; detail = "not signed in yet"; }
       } else if (kind === "ebay") {
@@ -2537,6 +2542,7 @@
   const activity = {
     summary: [],
     home: null, // [lat, lon] from home_location, for the pickup map
+    sort: "score", // score | myrank | distance | newest
     listings: [],
     total: 0,
     truncated: false,
@@ -2672,7 +2678,7 @@
       </div>
       <div class="dd-price">${esc(row.price)}${
         row.distance_mi != null ? `<span class="dist">${row.distance_mi} mi away</span>` : ""
-      }</div>
+      }<span id="dd-drive" class="drive"></span></div>
       <div class="dd-cols">
         <div class="dd-main">
           <div class="dd-kv">
@@ -2713,7 +2719,7 @@
           }
           ${
             row.coords && activity.home && row.marketplace === "facebook"
-              ? '<div id="dd-map" class="dd-map"></div><div id="dd-route" class="dd-route"></div>'
+              ? '<div id="dd-map" class="dd-map"></div>'
               : ""
           }
         </div>
@@ -2748,30 +2754,47 @@
     });
     L.marker(home, { icon, title: "Home" }).addTo(dealMap);
     L.marker(item, { icon, title: row.location }).addTo(dealMap);
-    L.polyline([home, item], { weight: 2, opacity: 0.6 }).addTo(dealMap);
-    dealMap.fitBounds([home, item], { padding: [28, 28] });
+    // A dashed straight line until real geometry arrives, so the map is never
+    // ambiguous about which two points it is relating.
+    const hint = L.polyline([home, item], {
+      weight: 2,
+      opacity: 0.35,
+      dashArray: "5,6",
+    }).addTo(dealMap);
+    dealMap.fitBounds([home, item], { padding: [30, 30] });
 
-    const routeHost = $("#dd-route");
-    if (!routeHost) return;
+    const driveHost = $("#dd-drive");
+    const fmt = (r) => {
+      const h = Math.floor(r.minutes / 60);
+      const m = r.minutes % 60;
+      return `${h ? h + "h " : ""}${m}m \u00B7 ${r.miles} mi by road`;
+    };
+    const drawRoute = (r) => {
+      if (driveHost) driveHost.textContent = fmt(r);
+      if (!dealMap || !r.geometry || r.geometry.length < 2) return;
+      dealMap.removeLayer(hint);
+      const line = L.polyline(r.geometry, { weight: 5, opacity: 0.85 }).addTo(dealMap);
+      dealMap.fitBounds(line.getBounds(), { padding: [26, 26] });
+    };
+
     if (row._route) {
-      routeHost.textContent = row._route;
+      drawRoute(row._route);
       return;
     }
-    routeHost.textContent = "estimating drive\u2026";
+    if (driveHost) driveHost.textContent = "estimating drive\u2026";
     api(`/api/route?to=${item[0]},${item[1]}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((r) => {
         if (!r) {
-          routeHost.textContent = "";
+          if (driveHost) driveHost.textContent = "";
           return;
         }
-        const h = Math.floor(r.minutes / 60);
-        const m = r.minutes % 60;
-        row._route = `\u2248 ${h ? h + "h " : ""}${m}m drive for pickup \u00B7 ${r.miles} mi by road`;
-        routeHost.textContent = row._route;
+        row._route = r;
+        // The selection may have moved on while this was in flight.
+        if (activity.selected === rowKey(row)) drawRoute(r);
       })
       .catch(() => {
-        routeHost.textContent = "";
+        if (driveHost) driveHost.textContent = "";
       });
   };
 
@@ -2807,12 +2830,27 @@
     });
   }
 
+  // Sorting is client-side so switching order never needs a refetch, and it
+  // orders the full returned set rather than re-slicing the server's top-N.
+  // Missing values sort last in every mode -- an unresolvable distance or an
+  // un-stamped legacy row should not masquerade as the best hit.
+  const SORTERS = {
+    score: (a, b) => b.score - a.score || a.item.localeCompare(b.item),
+    myrank: (a, b) => (b.my_rank || 0) - (a.my_rank || 0) || b.score - a.score,
+    distance: (a, b) => {
+      const av = a.distance_mi == null ? Infinity : a.distance_mi;
+      const bv = b.distance_mi == null ? Infinity : b.distance_mi;
+      return av - bv || b.score - a.score;
+    },
+    newest: (a, b) => (b.rated_at || 0) - (a.rated_at || 0) || b.score - a.score,
+  };
+
   const renderActivity = () => {
     renderActivitySummary();
     const host = $("#activity-rows");
     if (!host) return;
 
-    const rows = visibleActivityRows();
+    const rows = visibleActivityRows().sort(SORTERS[activity.sort] || SORTERS.score);
     const counter = $("#activity-count");
     if (counter) {
       counter.textContent = activity.total
@@ -3159,6 +3197,28 @@
       activity.filter = e.target.value;
       renderActivity();
     });
+  }
+
+  const dealSort = $("#deal-sort");
+  if (dealSort) {
+    dealSort.addEventListener("change", (e) => {
+      activity.sort = e.target.value;
+      try {
+        localStorage.setItem("aimm.dealSort", activity.sort);
+      } catch (_) {
+        /* private browsing: the choice just does not persist */
+      }
+      renderActivity();
+    });
+    try {
+      const saved = localStorage.getItem("aimm.dealSort");
+      if (saved && SORTERS[saved]) {
+        activity.sort = saved;
+        dealSort.value = saved;
+      }
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   const activityRefreshBtn = $("#activity-refresh");

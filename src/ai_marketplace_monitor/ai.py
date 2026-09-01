@@ -91,9 +91,12 @@ class AIResponse:
         store = cache if local_cache is None else local_cache
         # Drift-proof mirror keyed by identity rather than content hash; the
         # activity view joins on this. See CacheType.AI_BY_LISTING.
+        # rated_at rides only on this mirror: it is the closest thing to a
+        # "discovered at" stamp (the cache stores none), and it is never fed
+        # back through AIResponse(**res), which would reject the extra key.
         store.set(
             (CacheType.AI_BY_LISTING.value, listing.marketplace, listing.id, item_config.name),
-            asdict(self),
+            {**asdict(self), "rated_at": time.time()},
             tag=CacheType.AI_BY_LISTING.value,
         )
         store.set(

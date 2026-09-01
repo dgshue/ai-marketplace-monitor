@@ -785,8 +785,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="home_location not set")
         hlat, hlon = home
 
+        # v2 keys carry route geometry; v1 entries had only distance/duration
+        # and would render as a missing route line if served to the new client.
         cache_key = (
             "route-cache",
+            "v2",
             f"{round(hlat, 3)},{round(hlon, 3)}",
             f"{round(tlat, 3)},{round(tlon, 3)}",
         )
@@ -794,17 +797,23 @@ def create_app(
         if isinstance(hit, dict) and hit.get("at", 0) > time.time() - 86400:
             return hit["result"]
 
+        # `simplified` geometry is a few dozen points rather than the several
+        # hundred `full` returns -- enough to draw the roads taken without
+        # bloating the response or the cache.
         url = (
             f"https://router.project-osrm.org/route/v1/driving/"
-            f"{hlon},{hlat};{tlon},{tlat}?overview=false"
+            f"{hlon},{hlat};{tlon},{tlat}?overview=simplified&geometries=geojson"
         )
         try:
-            resp = _requests.get(url, timeout=8)
+            resp = _requests.get(url, timeout=10)
             data = resp.json()
             leg = data["routes"][0]
+            # GeoJSON is [lon, lat]; Leaflet wants [lat, lon].
+            coords = (leg.get("geometry") or {}).get("coordinates") or []
             result = {
                 "minutes": round(leg["duration"] / 60),
                 "miles": round(leg["distance"] / 1609.344, 1),
+                "geometry": [[round(c[1], 5), round(c[0], 5)] for c in coords],
             }
         except KeyboardInterrupt:
             raise

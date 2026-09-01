@@ -342,6 +342,9 @@ def build_activity(
                     "conclusion": CONCLUSIONS.get(score, ""),
                     "comment": rating.get("comment", "") or "",
                     "ai_name": rating.get("name", "") or "",
+                    # Only present on ratings written by the identity mirror;
+                    # older rows sort last under "newest".
+                    "rated_at": rating.get("rated_at"),
                     "threshold": threshold,
                     "verdict": verdict,
                     "notified_at": notified.get((listing.marketplace, listing.id), ""),
