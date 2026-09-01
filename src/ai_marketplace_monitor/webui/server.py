@@ -177,6 +177,14 @@ def _enumerate_urls(host: str, port: int) -> List[str]:
     return [f"http://{host}:{port}"]
 
 
+def _supported_marketplace_names() -> List[str]:
+    # Imported lazily: config.py imports the marketplace modules, and this
+    # module is imported by cli.py before the monitor exists.
+    from ..config import supported_marketplaces
+
+    return sorted(supported_marketplaces)
+
+
 def create_app(
     config: WebUIConfig,
     state: AuthState,
@@ -342,6 +350,10 @@ def create_app(
             "open": is_open(),
             "vnc_enabled": os.environ.get("AIMM_ENABLE_VNC") == "1"
             and Path(os.environ.get("AIMM_NOVNC_DIR", "/usr/share/novnc")).is_dir(),
+            # Every marketplace type the backend can drive, so the config UI
+            # can offer un-configured ones as "Set up" cards instead of hiding
+            # them behind the Add-section dropdown.
+            "marketplaces": _supported_marketplace_names(),
         }
 
     @app.get("/api/config/files")

@@ -29,6 +29,7 @@
     wsConnected: false,
     errorCount: 0, // unread ERROR-level messages (for tab badge)
     monitorInfo: null, // last /api/monitor/state payload
+    supportedMarketplaces: ["facebook", "ebay", "depop", "poshmark"], // refreshed from /api/status
     envVars: null, // last /api/env-status payload
     appView: "deals",
   };
@@ -1073,6 +1074,40 @@
       { key: "enabled", label: "Enabled", type: "checkbox", group: "Status", column: "right" },
     ],
 
+    "marketplace.depop": [
+      { key: "enabled", label: "Enabled", type: "checkbox", column: "left" },
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "left",
+        options: [
+          { value: "", label: "Default (3)" },
+          { value: "3", label: "3 — poor match or better" },
+          { value: "4", label: "4 — good match or better" },
+          { value: "5", label: "5 — great deals only" },
+        ] },
+      { key: "notify", label: "Notify users", type: "text", column: "left" },
+      { key: "search_interval", label: "Search interval", type: "text", column: "left",
+        help: "e.g. '1h'. Scraped in the shared browser — be polite." },
+      { key: "min_price", label: "Min price", type: "text", column: "right" },
+      { key: "max_price", label: "Max price", type: "text", column: "right",
+        help: "Search tiles carry no description, so the AI judges on title + price only." },
+    ],
+
+    "marketplace.poshmark": [
+      { key: "enabled", label: "Enabled", type: "checkbox", column: "left" },
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "left",
+        options: [
+          { value: "", label: "Default (3)" },
+          { value: "3", label: "3 — poor match or better" },
+          { value: "4", label: "4 — good match or better" },
+          { value: "5", label: "5 — great deals only" },
+        ] },
+      { key: "notify", label: "Notify users", type: "text", column: "left" },
+      { key: "search_interval", label: "Search interval", type: "text", column: "left",
+        help: "e.g. '1h'. Scraped in the shared browser — be polite." },
+      { key: "min_price", label: "Min price", type: "text", column: "right" },
+      { key: "max_price", label: "Max price", type: "text", column: "right",
+        help: "Search tiles carry no description, so the AI judges on title + price only." },
+    ],
+
     "item.*": [
       // Left: item-specific
       { key: "search_phrases", label: "Search phrases", type: "text", required: true, column: "left",
@@ -1720,8 +1755,11 @@
   };
 
   // Open form in "add" mode: empty fields + a name input at top.
-  const openAddSectionModal = (prefix) => {
-    const schema = findFormSchema(prefix + ".*") || findFormSchema(prefix + ".facebook");
+  const openAddSectionModal = (prefix, suggested) => {
+    const schema =
+      (suggested && FORM_SCHEMAS[prefix + "." + suggested]) ||
+      findFormSchema(prefix + ".*") ||
+      findFormSchema(prefix + ".facebook");
     if (!schema) {
       alert(`No form defined for [${prefix}.*] — add it manually in the TOML editor.`);
       return;
@@ -1730,7 +1768,7 @@
     const existingNames = state.sections
       .filter((s) => s.prefix === prefix)
       .map((s) => s.suffix);
-    let suggestedName = prefix === "marketplace" ? "facebook" : "";
+    let suggestedName = suggested || (prefix === "marketplace" ? "facebook" : "");
 
     formContext = {
       sectionName: `${prefix}.__new__`,
@@ -1984,7 +2022,7 @@
     const sum = (activity.summary || []).find((x) => x.item === (section.suffix || section.name));
 
     const bound = fields.marketplace ? [].concat(fields.marketplace) : null;
-    const SRC_SUB = { facebook: "browser · local pickup", ebay: "Browse API · ships" };
+    const SRC_SUB = { facebook: "browser · local pickup", ebay: "Browse API · ships", depop: "scrape · ships", poshmark: "scrape · ships" };
     const sources = marketplaceNames()
       .map((mk) => {
         const on = bound === null || bound.includes(mk);
@@ -2166,6 +2204,33 @@
           <button class="ghost small edit" data-edit-section="${esc(nt.name)}">Edit</button>
         </div>`);
     }
+    // Sources the backend supports but the config does not mention yet —
+    // configuring a new marketplace should not require knowing a dropdown
+    // exists. "Set up" opens the add modal pre-named with the right schema.
+    const configuredKinds = new Set(
+      state.sections
+        .filter((x) => x.prefix === "marketplace")
+        .map((x) => {
+          const f = fieldsForSection(x);
+          return String(f.market_type || x.suffix || "facebook").toLowerCase();
+        })
+    );
+    const KIND_DESC = {
+      ebay: "official Browse API · free key from developer.ebay.com",
+      depop: "browser scrape · ships nationwide",
+      poshmark: "browser scrape · ships nationwide",
+      facebook: "browser · local pickup",
+    };
+    for (const kind of state.supportedMarketplaces || []) {
+      if (configuredKinds.has(kind)) continue;
+      cards.push(`
+        <div class="set avail">
+          <div class="t"><span class="state-dot dim"></span>${esc(kind)}</div>
+          <div class="d">${esc(KIND_DESC[kind] || "marketplace")} · not configured</div>
+          <button class="ghost small edit" data-setup-marketplace="${esc(kind)}">Set up</button>
+        </div>`);
+    }
+
     for (const us of state.sections.filter((x) => x.prefix === "user")) {
       const f = fieldsForSection(us);
       cards.push(`
@@ -2281,6 +2346,12 @@
       const addBtn = e.target.closest("[data-add]");
       if (addBtn) {
         openAddSectionModal(addBtn.dataset.add);
+        return;
+      }
+
+      const setupBtn = e.target.closest("[data-setup-marketplace]");
+      if (setupBtn) {
+        openAddSectionModal("marketplace", setupBtn.dataset.setupMarketplace);
         return;
       }
 
@@ -2475,19 +2546,11 @@
   };
 
   const syncActivityItemDropdown = () => {
-    const sel = $("#activity-item-filter");
-    if (!sel) return;
-    const names = activity.summary.map((s) => s.item).filter(Boolean);
-    const existing = new Set(Array.from(sel.options).map((o) => o.value));
-    names.forEach((name) => {
-      if (existing.has(name)) return;
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      sel.appendChild(opt);
-    });
+    /* The item dropdown was replaced by the clickable summary pills. */
   };
 
+  // One compact pill per item — click filters the list to it. Replaces the
+  // wide scorecards, which stopped scaling past a handful of items.
   const renderActivitySummary = () => {
     const host = $("#activity-summary");
     if (!host) return;
@@ -2495,20 +2558,21 @@
       host.innerHTML = "";
       return;
     }
-    host.innerHTML = activity.summary
-      .map(
-        (s) => `
-        <div class="summary-card">
-          <div class="item-name" title="${esc(s.item)}">${esc(s.item)}</div>
-          <div class="summary-stats">
-            <span><b>${s.examined}</b>examined</span>
-            <span class="stat-promising"><b>${s.promising}</b>promising</span>
-            <span class="stat-notified"><b>${s.notified}</b>notified</span>
-            <span><b>${s.dismissed}</b>dismissed</span>
-          </div>
-        </div>`
-      )
+    const pills = activity.summary
+      .map((s) => {
+        const active = activity.item === s.item;
+        const tip = `${s.item}: ${s.examined} examined · ${s.promising} promising · ${s.notified} notified · ${s.dismissed} dismissed`;
+        return `
+        <button class="ipill ${active ? "on" : ""}" data-item-pill="${esc(s.item)}" title="${esc(tip)}">
+          <span class="n">${esc(s.item)}</span>
+          <span class="c">${s.examined}</span>
+          ${s.promising ? `<span class="c warn">${s.promising}★</span>` : ""}
+          ${s.notified ? `<span class="c ok">${s.notified}✓</span>` : ""}
+        </button>`;
+      })
       .join("");
+    host.innerHTML =
+      `<button class="ipill ${activity.item ? "" : "on"}" data-item-pill="">All items</button>` + pills;
   };
 
   const visibleActivityRows = () => {
@@ -2950,10 +3014,14 @@
     });
   });
 
-  const activityItemFilter = $("#activity-item-filter");
-  if (activityItemFilter) {
-    activityItemFilter.addEventListener("change", (e) => {
-      activity.item = e.target.value;
+  const activitySummaryHost = $("#activity-summary");
+  if (activitySummaryHost) {
+    activitySummaryHost.addEventListener("click", (e) => {
+      const pill = e.target.closest("[data-item-pill]");
+      if (!pill) return;
+      const picked = pill.dataset.itemPill;
+      // Clicking the active pill returns to All.
+      activity.item = activity.item === picked ? "" : picked;
       renderActivity();
     });
   }
@@ -3070,6 +3138,9 @@
           const status = await res.clone().json();
           const browserBtn = document.getElementById("browser-btn");
           if (browserBtn && status && status.vnc_enabled) browserBtn.hidden = false;
+          if (status && Array.isArray(status.marketplaces)) {
+            state.supportedMarketplaces = status.marketplaces;
+          }
         } catch (_) {}
         hideLogin();
         await bootstrap();

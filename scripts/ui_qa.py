@@ -79,6 +79,22 @@ with sync_playwright() as p:
     check("promising filter", True, f"{promising} rows")
     pg.click(".verdict-chips [data-verdict='']")
     pg.wait_for_timeout(400)
+
+    # --- item pills: summary row filters on click ---
+    n_pills = pg.eval_on_selector_all("#activity-summary .ipill", "e=>e.length")
+    check("item pills render", n_pills >= 2, n_pills)
+    first_item = pg.eval_on_selector("#activity-summary .ipill[data-item-pill]:not([data-item-pill=''])", "e=>e.dataset.itemPill")
+    pg.click(f"#activity-summary .ipill[data-item-pill='{first_item}']")
+    pg.wait_for_timeout(500)
+    rows_match = pg.evaluate(
+        "(item) => Array.from(document.querySelectorAll('.dli .m span:first-child')).every(x => x.textContent === item)",
+        first_item)
+    check("pill filters rows", rows_match, first_item)
+    check("pill active state", pg.eval_on_selector(f"#activity-summary .ipill[data-item-pill='{first_item}']", "e=>e.classList.contains('on')"))
+    pg.click(f"#activity-summary .ipill[data-item-pill='{first_item}']")
+    pg.wait_for_timeout(500)
+    check("pill toggles back to All", pg.eval_on_selector("#activity-summary .ipill[data-item-pill='']", "e=>e.classList.contains('on')"))
+
     pg.fill("#activity-filter", "3090")
     pg.wait_for_timeout(400)
     check("text filter", pg.eval_on_selector_all(".dli", "e=>e.length") > 0)
@@ -200,6 +216,16 @@ with sync_playwright() as p:
     pg.click('[data-add="item"]')
     pg.wait_for_timeout(500)
     check("Add item opens modal", not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"))
+    pg.click("#form-cancel")
+    pg.wait_for_timeout(300)
+
+    # --- available sources appear with Set up, prefilled to the right type ---
+    avail = pg.eval_on_selector_all(".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)")
+    check("available source cards", set(avail) >= {"ebay", "depop", "poshmark"}, avail)
+    pg.click(".set.avail [data-setup-marketplace='ebay']")
+    pg.wait_for_timeout(600)
+    check("setup modal prefilled", pg.eval_on_selector("#add-section-name", "e=>e.value") == "ebay")
+    check("setup uses ebay schema", bool(pg.query_selector("#field-client_id")))
     pg.click("#form-cancel")
     pg.wait_for_timeout(300)
 

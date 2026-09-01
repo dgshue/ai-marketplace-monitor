@@ -19,15 +19,22 @@ from .ai import (
     OpenAIBackend,
     TAIConfig,
 )
+from .depop import DepopMarketplace
 from .ebay import EbayMarketplace
 from .facebook import FacebookMarketplace
+from .poshmark import PoshmarkMarketplace
 from .marketplace import TItemConfig, TMarketplaceConfig
 from .notification import NotificationConfig
 from .region import RegionConfig
 from .user import User, UserConfig
 from .utils import MonitorConfig, Translator, hilight, merge_dicts
 
-supported_marketplaces = {"facebook": FacebookMarketplace, "ebay": EbayMarketplace}
+supported_marketplaces = {
+    "facebook": FacebookMarketplace,
+    "ebay": EbayMarketplace,
+    "depop": DepopMarketplace,
+    "poshmark": PoshmarkMarketplace,
+}
 supported_ai_backends = {
     "deepseek": DeepSeekBackend,
     "gemini": GeminiBackend,
