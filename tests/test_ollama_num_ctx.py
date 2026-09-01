@@ -40,8 +40,11 @@ def test_num_ctx_must_be_positive_int(bad: Any) -> None:
         _config(num_ctx=bad)
 
 
+# The parameter is deliberately not named `base_url`: pytest-playwright pulls
+# in pytest-base-url, whose session-scoped `base_url` fixture shadows a
+# parametrize argname of the same name and fails the test with a ScopeMismatch.
 @pytest.mark.parametrize(
-    "base_url, expected",
+    "configured_url, expected",
     [
         ("http://ollama:11434/v1", "http://ollama:11434/api/chat"),
         ("http://ollama:11434/v1/", "http://ollama:11434/api/chat"),
@@ -49,8 +52,8 @@ def test_num_ctx_must_be_positive_int(bad: Any) -> None:
         ("http://ollama:11434/", "http://ollama:11434/api/chat"),
     ],
 )
-def test_native_chat_url_strips_v1(base_url: str, expected: str) -> None:
-    backend = OllamaBackend(_config(base_url=base_url))
+def test_native_chat_url_strips_v1(configured_url: str, expected: str) -> None:
+    backend = OllamaBackend(_config(base_url=configured_url))
     assert backend._native_chat_url() == expected
 
 
