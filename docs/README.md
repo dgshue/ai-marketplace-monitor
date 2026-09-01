@@ -43,6 +43,7 @@ One of more sections to list the AI agent that can be used to judge if listings 
 | `model`       | Optional    | String   | Language model to be used.                                 |
 | `max_retries` | Optional    | Integer  | Max retry attempts if connection fails. Default to 10.     |
 | `timeout`     | Optional    | Integer  | Timeout (in seconds) waiting for response from AI service. |
+| `num_ctx`     | Optional    | Integer  | Ollama only: context window (tokens) to request. Pins the runner size so a shared Ollama server does not reload the model on every request; when set, Ollama's native `/api/chat` is used instead of `/v1`. |
 
 Note that:
 
