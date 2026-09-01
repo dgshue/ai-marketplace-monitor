@@ -2,7 +2,7 @@
 
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 import pytest
 
@@ -104,12 +104,10 @@ def test_block_cooldown_default_is_two_hours() -> None:
 
 
 def test_search_intervals_take_human_durations() -> None:
-    item = ItemConfig(
-        name="car",
-        search_phrases=["acura"],
-        search_interval="2h",
-        max_search_interval="4h",
-    )
+    # Built through **kwargs: the fields are typed int after validation, but
+    # a config file legitimately writes '2h' and the handler converts it.
+    fields: Dict[str, Any] = {"search_interval": "2h", "max_search_interval": "4h"}
+    item = ItemConfig(name="car", search_phrases=["acura"], **fields)
     assert item.search_interval == 2 * 60 * 60
     assert item.max_search_interval == 4 * 60 * 60
 
@@ -143,7 +141,7 @@ def test_request_delay_range_precedence() -> None:
 
 def test_pace_sleeps_inside_the_configured_range(monkeypatch: pytest.MonkeyPatch) -> None:
     """The pause is randomized, not fixed -- a metronome is a bot signature."""
-    slept = []
+    slept: List[float] = []
     monkeypatch.setattr("ai_marketplace_monitor.marketplace.time.sleep", slept.append)
     market = _marketplace(FacebookMarketplaceConfig(name="facebook", request_delay=[6, 15]))
     for _ in range(50):
@@ -154,7 +152,7 @@ def test_pace_sleeps_inside_the_configured_range(monkeypatch: pytest.MonkeyPatch
 
 
 def test_pace_disabled_by_a_zero_range(monkeypatch: pytest.MonkeyPatch) -> None:
-    slept = []
+    slept: List[float] = []
     monkeypatch.setattr("ai_marketplace_monitor.marketplace.time.sleep", slept.append)
     market = _marketplace(FacebookMarketplaceConfig(name="facebook", request_delay=[0, 0]))
     assert market.pace() == 0.0
@@ -363,7 +361,7 @@ def test_monitor_restores_pause_and_cooldown_before_any_search(
     assert restarted.web_paused.is_set()
     assert restarted.block_tracker.active("facebook") is not None
 
-    searched: list = []
+    searched: List[Any] = []
     restarted.set_web_activity = lambda *a, **k: None  # type: ignore[method-assign]
     restarted._search_item_impl = lambda *a: searched.append(a)  # type: ignore[method-assign]
     market_config = MarketplaceConfig(name="facebook")
