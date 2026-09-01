@@ -363,6 +363,47 @@ with sync_playwright() as p:
     check("card expands", pg.eval_on_selector(S, "e=>e.classList.contains('open')"))
     pg.screenshot(path="/tmp/qa/2-config-open.png")
 
+    # ---------- pacing: the cadence has to be visible without opening a modal ----------
+    cadences = pg.eval_on_selector_all(".icard .icadence", "e=>e.map(x=>x.textContent.trim())")
+    check(
+        "every item card shows its cadence",
+        len(cadences) == n_cards and all(c.startswith(("every ", "at ")) for c in cadences),
+        cadences[:6],
+    )
+    check(
+        "interval fields are inline, not behind a modal",
+        bool(pg.query_selector(S + " [data-field=search_interval]"))
+        and bool(pg.query_selector(S + " [data-field=max_search_interval]")),
+    )
+    check(
+        "cadence note explains where the value came from",
+        any(
+            w
+            in (pg.eval_on_selector_all(S + " .thr-note", "e=>e.map(x=>x.textContent)") or [""])[
+                -1
+            ]
+            for w in ("set on this item", "inherited from the marketplace", "default")
+        ),
+        pg.eval_on_selector_all(S + " .thr-note", "e=>e.map(x=>x.textContent.trim())"),
+    )
+    # writing a human duration must land in the buffer as a string, then revert
+    orig_int = pg.eval_on_selector(S + " [data-field=search_interval]", "e=>e.value")
+    pg.fill(S + " [data-field=search_interval]", "2h")
+    pg.eval_on_selector(S + " [data-field=search_interval]", "e=>e.blur()")
+    pg.wait_for_timeout(700)
+    seg_iv = pg.evaluate(
+        "document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]"
+    )
+    check("interval writes a duration string", 'search_interval = "2h"' in seg_iv, seg_iv[:120])
+    check(
+        "cadence label follows the edit",
+        "every 2h" in pg.eval_on_selector(S + " .icadence", "e=>e.textContent"),
+        pg.eval_on_selector(S + " .icadence", "e=>e.textContent"),
+    )
+    pg.fill(S + " [data-field=search_interval]", orig_int)
+    pg.eval_on_selector(S + " [data-field=search_interval]", "e=>e.blur()")
+    pg.wait_for_timeout(700)
+
     # chips: add then remove a phrase (net zero)
     pg.fill(S + " [data-chip-add='search_phrases']", "qa test phrase")
     pg.press(S + " [data-chip-add='search_phrases']", "Enter")
@@ -504,6 +545,22 @@ with sync_playwright() as p:
         "More settings opens modal",
         not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
     )
+    # The schedule fields are the whole point of the pacing work -- they must
+    # render with "Show advanced fields" OFF.
+    pg.click(".form-tab-bar .form-tab:nth-child(2)")
+    pg.wait_for_timeout(350)
+    adv_off = (
+        pg.eval_on_selector("#show-advanced", "e=>!e.checked")
+        if pg.query_selector("#show-advanced")
+        else True
+    )
+    check(
+        "item schedule fields are not advanced-only",
+        adv_off
+        and bool(pg.query_selector("#field-search_interval"))
+        and bool(pg.query_selector("#field-max_search_interval")),
+        "advanced off" if adv_off else "advanced was already on",
+    )
     pg.click("#form-cancel")
     pg.wait_for_timeout(300)
     pg.click(".set [data-edit-section='marketplace.facebook']")
@@ -592,6 +649,14 @@ with sync_playwright() as p:
                     if has_home
                     else "MISSING"
                 ),
+            )
+            check(
+                "facebook form exposes request_delay",
+                bool(pg.query_selector("#field-request_delay")),
+            )
+            check(
+                "facebook form exposes block_cooldown",
+                bool(pg.query_selector("#field-block_cooldown")),
             )
         hint = pg.eval_on_selector("#form-modal-hint", "e=>e.hidden ? '' : e.textContent") or ""
         check(
@@ -712,7 +777,66 @@ with sync_playwright() as p:
     check(
         "status refresh", "updated" in pg.eval_on_selector("#status-updated", "e=>e.textContent")
     )
+    check(
+        "status tile count unchanged by block work",
+        pg.eval_on_selector_all(".stile", "e=>e.length") == 4,
+    )
     pg.screenshot(path="/tmp/qa/4-status.png")
+
+    # ---------- block state: rendered from a stubbed payload ----------
+    # Provoking a real Facebook block to test the UI is not an option, so the
+    # renderers are asserted directly against the shape /api/monitor/state
+    # publishes. window.__aimm exists for exactly this.
+    block_probe = pg.evaluate(
+        """() => {
+          const A = window.__aimm;
+          if (!A) return { missing: true };
+          const now = 1000;
+          const info = { available: true, blocked: { facebook: {
+            marketplace: "facebook", reason: 'page title "You're Temporarily Blocked"',
+            detected_at: 0, until: 1000 + 3600, remaining: 3600, strikes: 2 } } };
+          const stale = { available: true, blocked: { facebook: {
+            marketplace: "facebook", reason: "old", detected_at: 0, until: 500 } } };
+          const html = A.renderBlockNotice(info, now);
+          return {
+            active: A.activeBlocks(info, now).length,
+            expiredIgnored: A.activeBlocks(stale, now).length,
+            noneWhenClear: A.activeBlocks({ available: true, blocked: {} }, now).length,
+            chip: A.blockChipLabel(info.blocked.facebook),
+            html,
+            emptyHtml: A.renderBlockNotice({ available: true, blocked: {} }, now),
+            cadence: [A.parseDuration("2h"), A.parseDuration(1800), A.parseDuration("90m"),
+                      A.parseDuration("bogus"), A.fmtCadence(7200), A.fmtCadence(2700)],
+          };
+        }"""
+    )
+    check("block renderers exposed for QA", not block_probe.get("missing"))
+    check("active block detected", block_probe.get("active") == 1)
+    check("expired cooldown is not shown", block_probe.get("expiredIgnored") == 0)
+    check("no block reads as clear", block_probe.get("noneWhenClear") == 0)
+    check(
+        "chip reads 'facebook: blocked - retry HH:MM'",
+        (block_probe.get("chip") or "").startswith("facebook: blocked")
+        and ": blocked" in (block_probe.get("chip") or "")
+        and len((block_probe.get("chip") or "").split("retry ")[-1]) == 5,
+        block_probe.get("chip"),
+    )
+    _bh = block_probe.get("html") or ""
+    check(
+        "status page offers Clear block with the reason and retry time",
+        "Blocked marketplaces" in _bh
+        and "Clear block / retry now" in _bh
+        and "Temporarily Blocked" in _bh
+        and 'data-clear-block="facebook"' in _bh
+        and "strike 2" in _bh,
+        _bh[:160],
+    )
+    check("no notice when nothing is blocked", block_probe.get("emptyHtml") == "")
+    check(
+        "duration parsing matches the backend",
+        block_probe.get("cadence") == [7200, 1800, 5400, None, "2h", "45m"],
+        block_probe.get("cadence"),
+    )
 
     # ---------- header controls ----------
     check(

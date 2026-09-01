@@ -658,7 +658,9 @@ def create_app(
     ) -> Dict[str, Any]:
         if config.monitor is None:
             raise HTTPException(status_code=503, detail="Monitor not attached to web UI.")
-        config.monitor.web_paused.set()
+        # set_paused, not web_paused.set(): the flag has to reach disk, or the
+        # next restart resumes searching a marketplace that just blocked us.
+        config.monitor.set_paused(True)
         return {"ok": True, "paused": True}
 
     @app.post("/api/monitor/resume")
@@ -668,8 +670,31 @@ def create_app(
     ) -> Dict[str, Any]:
         if config.monitor is None:
             raise HTTPException(status_code=503, detail="Monitor not attached to web UI.")
-        config.monitor.web_paused.clear()
+        config.monitor.set_paused(False)
         return {"ok": True, "paused": False}
+
+    @app.post("/api/monitor/clear-block")
+    async def clear_block(
+        request: Request,
+        _: str = Depends(require_session),
+        __: None = Depends(require_csrf),
+    ) -> Dict[str, Any]:
+        """Drop a marketplace's block cooldown so the next run searches again.
+
+        The user often knows the jail lifted before the cooldown expires;
+        without this the only way back is a restart.
+        """
+        if config.monitor is None:
+            raise HTTPException(status_code=503, detail="Monitor not attached to web UI.")
+        try:
+            body = await request.json()
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            body = {}
+        marketplace = (body or {}).get("marketplace") or None
+        cleared = config.monitor.clear_block(marketplace)
+        return {"ok": True, "cleared": cleared}
 
     @app.post("/api/listing/flag")
     async def flag_listing(

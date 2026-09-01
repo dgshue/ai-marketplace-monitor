@@ -91,6 +91,35 @@ class NotificationConfig(BaseConfig):
                 succ.append(subclass.notify_all(config, *args, **kwargs))
         return any(succ)
 
+    @classmethod
+    def send_alert_all(
+        cls: type["NotificationConfig"],
+        config: "NotificationConfig",
+        title: str,
+        message: str,
+        logger: Logger | None = None,
+    ) -> bool:
+        """Send one plain message through every configured notifier.
+
+        Separate from ``notify_all`` because an operational alert (the
+        marketplace blocked us) has no listings and no AI ratings to format.
+        Backends that never implemented ``send_message`` -- email builds its
+        own MIME body instead -- are skipped rather than retried five times
+        into a NotImplementedError.
+        """
+        succ = []
+        for subclass in cls.__subclasses__():
+            flds = {f.name for f in fields(subclass)}
+            subclass_obj = subclass(**{k: getattr(config, k) for k in flds})
+            sends_plain = (
+                subclass.__name__ not in ("UserConfig", "PushNotificationConfig")
+                and getattr(subclass, "send_message", None) is not NotificationConfig.send_message
+            )
+            if sends_plain and subclass_obj._has_required_fields():
+                succ.append(subclass_obj.send_message_with_retry(title, message, logger=logger))
+            succ.append(subclass.send_alert_all(config, title, message, logger=logger))
+        return any(succ)
+
     def _execute_with_retry(
         self: "NotificationConfig",
         title: str,

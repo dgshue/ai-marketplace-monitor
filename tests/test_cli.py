@@ -70,6 +70,8 @@ notify = 'user1'
 radius = 100
 search_interval = 10
 search_region = 'usa'
+request_delay = [6, 15]
+block_cooldown = '2h'
 """
 
 base_item_cfg = """
@@ -98,6 +100,7 @@ max_price = 300
 rating = 4
 max_search_interval = '1d'
 search_interval = '12h'
+request_delay = [8, 20]
 min_price = 200
 notify = 'user1'
 radius = 100
@@ -294,6 +297,10 @@ def test_config(config_file: Callable, config_content: str, acceptable: bool) ->
         "radius": (list, type(None)),
         "rating": (list, type(None)),
         "remind": (int, type(None)),
+        # Randomized pacing between page loads, normalized to a [min, max]
+        # pair of seconds; block_cooldown is marketplace-only.
+        "request_delay": (list, type(None)),
+        "block_cooldown": (int, type(None)),
         "search_city": (list, type(None)),
         "search_interval": (int, type(None)),
         "search_phrases": list,

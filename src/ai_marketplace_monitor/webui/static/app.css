@@ -1492,6 +1492,9 @@ table.status-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 .istat b { color: var(--text); }
 .istat .hit b { color: var(--ok); }
+/* The cadence never wraps: "every 2h-4h" split over two lines reads as two
+   different numbers. */
+.istat .icadence { white-space: nowrap; }
 
 .icard .caret { color: var(--text-dim); transition: transform 0.15s; flex: none; }
 .icard.open .caret { transform: rotate(90deg); }

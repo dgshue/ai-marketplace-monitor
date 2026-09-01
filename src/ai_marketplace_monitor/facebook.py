@@ -15,7 +15,13 @@ from playwright.sync_api import Browser, ElementHandle, Page  # type: ignore
 from rich.pretty import pretty_repr
 
 from .listing import Listing
-from .marketplace import ItemConfig, Marketplace, MarketplaceConfig, WebPage
+from .marketplace import (
+    ItemConfig,
+    Marketplace,
+    MarketplaceBlockedError,
+    MarketplaceConfig,
+    WebPage,
+)
 from .utils import (
     BaseConfig,
     CounterItem,
@@ -95,6 +101,70 @@ SORT_BY_PARAM = {
     SortBy.PRICE_DESCEND.value: "price_descend",
     SortBy.DISTANCE_ASCEND.value: "distance_ascend",
 }
+
+
+# Page titles Facebook serves when it has throttled the session. Taken
+# verbatim from kevinzg/facebook-scraper's `temp_ban_titles`, which raises
+# TemporarilyBanned on exactly these three:
+#   https://github.com/kevinzg/facebook-scraper/blob/master/facebook_scraper/facebook_scraper.py
+BLOCK_TITLE_SIGNS: Tuple[str, ...] = (
+    "you're temporarily blocked",
+    "you can't use this feature at the moment",
+    "you can't use this feature right now",
+)
+
+# Body copy for the same states, plus the account-level ones the same file
+# checks for ("we suspended your account", "your account has been disabled",
+# "we saw unusual activity on your account"). Matched against page text
+# because Facebook sometimes keeps a generic <title> on the block interstitial.
+BLOCK_BODY_SIGNS: Tuple[str, ...] = (
+    "you're temporarily blocked",
+    "you can't use this feature at the moment",
+    "you can't use this feature right now",
+    "we suspended your account",
+    "your account has been disabled",
+    "we saw unusual activity on your account",
+    "your account has been temporarily locked",
+)
+
+# URL fragments that mean the request never reached Marketplace at all.
+# facebook-scraper gates its suspension checks on "checkpoint" appearing in
+# the response URL; a bounce to the login form mid-search means the same
+# thing from our side -- the session was invalidated, not merely expired.
+BLOCK_URL_SIGNS: Tuple[str, ...] = ("/checkpoint",)
+LOGIN_URL_SIGNS: Tuple[str, ...] = ("/login.php", "/login/", "/login?")
+
+
+def detect_block_signal(
+    url: str, title: str, body: str, check_login_redirect: bool = True
+) -> str | None:
+    """Name the block signal present in a page, or None if it looks normal.
+
+    Pure on purpose: everything that decides whether the monitor stops talking
+    to Facebook for hours is testable without a browser. Curly apostrophes are
+    folded to straight ones because Facebook uses both.
+    """
+
+    def norm(text: str) -> str:
+        return (text or "").replace("\u2019", "'").lower()
+
+    url_l = norm(url)
+    for sign in BLOCK_URL_SIGNS:
+        if sign in url_l:
+            return f"redirected to a Facebook checkpoint ({url})"
+    if check_login_redirect and any(sign in url_l for sign in LOGIN_URL_SIGNS):
+        return f"redirected to the Facebook login page ({url})"
+
+    title_l = norm(title)
+    for sign in BLOCK_TITLE_SIGNS:
+        if sign in title_l:
+            return f'page title "{title.strip()}"'
+
+    body_l = norm(body)
+    for sign in BLOCK_BODY_SIGNS:
+        if sign in body_l:
+            return f'page text "{sign}"'
+    return None
 
 
 @dataclass
@@ -306,6 +376,56 @@ class FacebookMarketplace(Marketplace):
     def get_item_config(cls: Type["FacebookMarketplace"], **kwargs: Any) -> FacebookItemConfig:
         return FacebookItemConfig(**kwargs)
 
+    # How much of the page body to scan for block copy. The interstitial puts
+    # its message in the first screenful; reading the whole DOM text of a
+    # Marketplace grid would cost more than the check saves.
+    BLOCK_SCAN_CHARS: ClassVar[int] = 4000
+
+    def _block_signal(
+        self: "FacebookMarketplace", check_login_redirect: bool = True
+    ) -> str | None:
+        """Inspect the current page for a block/rate-limit interstitial."""
+        if self.page is None:
+            return None
+        try:
+            url = self.page.url or ""
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            url = ""
+        try:
+            title = self.page.title() or ""
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            title = ""
+        body = ""
+        try:
+            body = (self.page.locator("body").first.inner_text(timeout=5000) or "")[
+                : self.BLOCK_SCAN_CHARS
+            ]
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            # A page too broken to read its own body is not evidence of a
+            # block; the url/title checks above still stand.
+            body = ""
+        return detect_block_signal(url, title, body, check_login_redirect=check_login_redirect)
+
+    def _raise_if_blocked(
+        self: "FacebookMarketplace", context: str, check_login_redirect: bool = True
+    ) -> None:
+        """Abort the current search when Facebook is refusing to serve us."""
+        signal = self._block_signal(check_login_redirect=check_login_redirect)
+        if signal is None:
+            return
+        if self.logger:
+            self.logger.error(
+                f"""{hilight("[Blocked]", "fail")} Facebook is refusing requests """
+                f"""while {context}: {signal}"""
+            )
+        raise MarketplaceBlockedError(self.name, signal)
+
     def login(self: "FacebookMarketplace") -> None:
         assert self.browser is not None
 
@@ -344,6 +464,9 @@ class FacebookMarketplace(Marketplace):
         # skips the login_wait_time pause -- which is the point of persisting the
         # session, since that pause exists solely to hand-enter a 2FA code.
         self.page.wait_for_timeout(1500)
+        # check_login_redirect is off here: we navigated to the login page on
+        # purpose, so only the block copy itself counts as evidence.
+        self._raise_if_blocked("logging in", check_login_redirect=False)
         if self.page.query_selector('input[name="email"]') is None:
             if self.logger:
                 self.logger.info(
@@ -533,15 +656,19 @@ class FacebookMarketplace(Marketplace):
                 self.goto_url(
                     marketplace_url + "&".join([f"query={quote(search_phrase)}", *options])
                 )
+                # Before parsing: a block interstitial parses as "zero
+                # listings", which is how hours of hammering a block page
+                # looked like an ordinary quiet search.
+                self._raise_if_blocked(f"searching for {search_phrase}")
 
                 found_listings = FacebookSearchResultPage(
                     self.page, self.translator, self.logger
                 ).get_listings()
-                time.sleep(5)
-                if self.logger:
-                    self.logger.error(
-                        f"""{hilight("[Search]", "fail")} Failed to get search results for {search_phrase} from {city}"""
+                if not found_listings and self.logger:
+                    self.logger.warning(
+                        f"""{hilight("[Search]", "fail")} No search results for {search_phrase} from {city}"""
                     )
+                self.pace(item_config, reason="between search pages")
 
                 counter.increment(CounterItem.SEARCH_PERFORMED, item_config.name)
 
@@ -567,7 +694,7 @@ class FacebookMarketplace(Marketplace):
                             location=listing.location,
                         )
                         if not from_cache:
-                            time.sleep(5)
+                            self.pace(item_config, reason="after a listing page")
                     except KeyboardInterrupt:
                         raise
                     except Exception as e:
@@ -644,6 +771,7 @@ class FacebookMarketplace(Marketplace):
 
         assert self.page is not None
         self.goto_url(post_url)
+        self._raise_if_blocked(f"reading {post_url}")
         counter.increment(CounterItem.LISTING_QUERY, item_config.name)
         details = parse_listing(self.page, post_url, self.translator, self.logger)
         if details is None:

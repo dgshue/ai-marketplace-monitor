@@ -62,6 +62,54 @@ cache = Cache(amm_home)
 # and lives in amm_home alongside the cache.
 browser_state_file = amm_home / "browser-state.json"
 
+# Operator state that MUST outlive the process: the manual pause and any
+# marketplace block cooldown. Both used to be in-memory only, so a restart --
+# or a container recreation, which happens on every deploy -- silently resumed
+# searching. That resumed hitting Facebook while the account was blocked.
+# Not sensitive: no credentials, just flags and timestamps.
+monitor_state_file = amm_home / "monitor-state.json"
+
+
+def read_monitor_state(path: Path | None = None) -> Dict[str, Any]:
+    """Load persisted monitor state, or an empty dict if there is none.
+
+    Never raises: a missing, unreadable, or malformed file just means "no
+    remembered state", which is the same situation as a first run.
+    """
+    target = monitor_state_file if path is None else path
+    try:
+        with open(target, encoding="utf-8") as f:
+            data = json.load(f)
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_monitor_state(state: Dict[str, Any], path: Path | None = None) -> bool:
+    """Persist monitor state atomically. Returns whether it was written.
+
+    Written via a temp file and replaced, so a kill mid-write cannot leave a
+    truncated file that reads as "not paused" on the next start.
+    """
+    target = monitor_state_file if path is None else path
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(tmp, target)
+        return True
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
 
 TConfigType = TypeVar("TConfigType", bound="BaseConfig")
 

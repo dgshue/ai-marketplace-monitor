@@ -1,9 +1,11 @@
 import os
+import random
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from logging import Logger
-from typing import Any, Callable, Generator, Generic, List, Type, TypeVar
+from typing import Any, Callable, Dict, Generator, Generic, List, Tuple, Type, TypeVar
 
 from playwright.sync_api import Browser, ElementHandle, Locator, Page  # type: ignore
 
@@ -19,12 +21,184 @@ from .utils import (
     hilight,
 )
 
+# Randomized pause between two page loads against the same site, in seconds.
+# Two independent sources converge on a 5-15s uniform range for Facebook:
+#   * kevinzg/facebook-scraper issue #548 uses `time.sleep(randint(5, 15))`
+#     between requests (https://github.com/kevinzg/facebook-scraper/issues/548)
+#   * the 2026 "Scrape Facebook Public Data Without the Graph API" writeup
+#     defaults its rate limiter to `delay_range=(5, 15)` and sleeps
+#     `random.uniform(*delay_range)` before every request.
+# The floor is raised to 6s here because the flat 5s this replaced was itself
+# enough to earn a temporary block on a busy config.
+DEFAULT_REQUEST_DELAY: Tuple[int, int] = (6, 15)
+
+# How long to stop touching a marketplace after it signals a block. The only
+# concrete number the ecosystem offers is "at least an hour" before retrying a
+# temporarily-banned Facebook account (kevinzg/facebook-scraper issue #390);
+# 2h doubles that, since a monitor has no deadline and a second strike costs
+# far more than a late listing.
+DEFAULT_BLOCK_COOLDOWN: int = 2 * 60 * 60
+
 
 class MarketPlace(Enum):
     FACEBOOK = "facebook"
     EBAY = "ebay"
     DEPOP = "depop"
     POSHMARK = "poshmark"
+
+
+class MarketplaceBlockedError(RuntimeError):
+    """Raised when a marketplace answers with a block / rate-limit page.
+
+    Carries the human-readable signal that triggered it so the log line and
+    the notification can say *why* the monitor backed off.
+    """
+
+    def __init__(self: "MarketplaceBlockedError", marketplace: str, reason: str) -> None:
+        super().__init__(f"{marketplace} is blocking requests: {reason}")
+        self.marketplace = marketplace
+        self.reason = reason
+
+
+@dataclass
+class BlockState:
+    """A marketplace that is currently sitting out a cooldown.
+
+    Timestamps are plain unix floats so this serializes to the web UI without
+    any timezone guessing on either side.
+    """
+
+    marketplace: str
+    reason: str
+    detected_at: float
+    until: float
+    # How many blocks in a row have been seen without an intervening clear.
+    strikes: int = 1
+
+    def remaining(self: "BlockState", now: float | None = None) -> float:
+        """Seconds left on the cooldown, never negative."""
+        return max(0.0, self.until - (time.time() if now is None else now))
+
+    def is_active(self: "BlockState", now: float | None = None) -> bool:
+        return self.remaining(now) > 0
+
+    def as_dict(self: "BlockState", now: float | None = None) -> Dict[str, Any]:
+        return {
+            "marketplace": self.marketplace,
+            "reason": self.reason,
+            "detected_at": self.detected_at,
+            "until": self.until,
+            "remaining": self.remaining(now),
+            "strikes": self.strikes,
+        }
+
+
+def block_cooldown_for(base_cooldown: int, strikes: int, max_multiplier: int = 4) -> int:
+    """Cooldown length for the `strikes`-th consecutive block.
+
+    Doubles per repeat and then flattens: a site that keeps saying no after a
+    two-hour wait is not going to relent in another two, but an unbounded
+    backoff would silently retire the marketplace.
+    """
+    if strikes < 1:
+        strikes = 1
+    return int(base_cooldown * min(2 ** (strikes - 1), max_multiplier))
+
+
+class BlockTracker:
+    """Per-marketplace block state, shared between the monitor and web threads.
+
+    Every mutation replaces a whole ``BlockState``; the lock only keeps the
+    dict itself consistent for the web thread's snapshot.
+    """
+
+    def __init__(self: "BlockTracker") -> None:
+        self._states: Dict[str, BlockState] = {}
+        self._lock = threading.Lock()
+
+    def block(
+        self: "BlockTracker",
+        marketplace: str,
+        reason: str,
+        base_cooldown: int = DEFAULT_BLOCK_COOLDOWN,
+        now: float | None = None,
+    ) -> BlockState:
+        """Record a block and start (or escalate) its cooldown."""
+        now = time.time() if now is None else now
+        with self._lock:
+            previous = self._states.get(marketplace)
+            strikes = previous.strikes + 1 if previous is not None else 1
+            state = BlockState(
+                marketplace=marketplace,
+                reason=reason,
+                detected_at=now,
+                until=now + block_cooldown_for(base_cooldown, strikes),
+                strikes=strikes,
+            )
+            self._states[marketplace] = state
+        return state
+
+    def active(
+        self: "BlockTracker", marketplace: str, now: float | None = None
+    ) -> BlockState | None:
+        """The live block for a marketplace, or None once the cooldown lapses.
+
+        An elapsed cooldown is kept, not dropped: the strike count is what
+        makes a second block back off further than the first.
+        """
+        with self._lock:
+            state = self._states.get(marketplace)
+        return state if state is not None and state.is_active(now) else None
+
+    def clear(self: "BlockTracker", marketplace: str | None = None) -> List[str]:
+        """Forget block state. Returns the marketplace names actually cleared."""
+        with self._lock:
+            if marketplace is None:
+                cleared = sorted(self._states)
+                self._states.clear()
+            else:
+                cleared = [marketplace] if marketplace in self._states else []
+                self._states.pop(marketplace, None)
+        return cleared
+
+    def to_dict(self: "BlockTracker") -> Dict[str, Dict[str, Any]]:
+        """Every state, expired ones included, for writing to disk."""
+        with self._lock:
+            states = list(self._states.values())
+        return {s.marketplace: s.as_dict() for s in states}
+
+    def restore(self: "BlockTracker", data: Dict[str, Any] | None) -> None:
+        """Reload state written by ``to_dict``, ignoring anything malformed.
+
+        A cooldown that expired while the process was down restores as an
+        inactive state: it no longer blocks searches, but its strike count
+        still makes the next block back off further.
+        """
+        if not isinstance(data, dict):
+            return
+        for name, raw in data.items():
+            if not isinstance(raw, dict):
+                continue
+            try:
+                state = BlockState(
+                    marketplace=str(raw.get("marketplace") or name),
+                    reason=str(raw.get("reason") or "unknown"),
+                    detected_at=float(raw.get("detected_at") or 0.0),
+                    until=float(raw.get("until") or 0.0),
+                    strikes=int(raw.get("strikes") or 1),
+                )
+            except KeyboardInterrupt:
+                raise
+            except (TypeError, ValueError):
+                continue
+            with self._lock:
+                self._states[state.marketplace] = state
+
+    def snapshot(self: "BlockTracker", now: float | None = None) -> Dict[str, Dict[str, Any]]:
+        """Only the still-active blocks, ready for JSON."""
+        with self._lock:
+            states = list(self._states.values())
+        return {s.marketplace: s.as_dict(now) for s in states if s.is_active(now)}
 
 
 @dataclass
@@ -46,6 +220,9 @@ class MarketItemCommonConfig(BaseConfig):
     search_interval: int | None = None
     max_search_interval: int | None = None
     start_at: List[str] | None = None
+    # [min, max] seconds to pause between two page loads. Randomized per
+    # request; see DEFAULT_REQUEST_DELAY for where the range comes from.
+    request_delay: List[int] | None = None
     search_region: List[str] | None = None
     max_price: str | None = None
     min_price: str | None = None
@@ -226,6 +403,62 @@ class MarketItemCommonConfig(BaseConfig):
                 f"Item {hilight(self.name)} search_interval must be at least 1 second."
             )
 
+    def handle_request_delay(self: "MarketItemCommonConfig") -> None:
+        """Normalize request_delay to a [min, max] pair of whole seconds.
+
+        Accepts a single number ("pause exactly this long"), a duration string
+        ('10s'), or a two-element list of either.
+        """
+        if self.request_delay is None:
+            return
+
+        def as_seconds(value: Any) -> int:
+            if isinstance(value, bool):
+                raise ValueError("request_delay must be a number of seconds.")
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if text.isdigit():
+                    return int(text)
+                # convert_to_seconds falls back to "now" (i.e. 0) for text it
+                # cannot read, which would silently disable pacing entirely.
+                seconds = convert_to_seconds(text)
+                if seconds <= 0:
+                    raise ValueError(f"{value!r} is not a duration.")
+                return seconds
+            raise ValueError("request_delay must be a number or duration string.")
+
+        values = (
+            self.request_delay
+            if isinstance(self.request_delay, (list, tuple))
+            else [self.request_delay]
+        )
+        try:
+            seconds = [as_seconds(x) for x in values]
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            raise ValueError(
+                f"Item {hilight(self.name)} request_delay {self.request_delay} is not recognized."
+            ) from e
+
+        if len(seconds) == 1:
+            seconds = seconds * 2
+        if len(seconds) != 2:
+            raise ValueError(
+                f"Item {hilight(self.name)} request_delay must be one or two values, "
+                "e.g. request_delay = [6, 15]."
+            )
+        if any(x < 0 for x in seconds):
+            raise ValueError(f"Item {hilight(self.name)} request_delay must not be negative.")
+        if seconds[0] > seconds[1]:
+            raise ValueError(
+                f"Item {hilight(self.name)} request_delay minimum {seconds[0]} is larger "
+                f"than its maximum {seconds[1]}."
+            )
+        self.request_delay = seconds
+
     def handle_search_region(self: "MarketItemCommonConfig") -> None:
         if self.search_region is None:
             return
@@ -381,6 +614,31 @@ class MarketplaceConfig(MarketItemCommonConfig):
     # own city slug or a numeric place id, neither of which geocodes.
     # Accepts "City, ST" or a bare "lat, lon" pair.
     home_location: str | None = None
+    # How long to stop searching this marketplace once it signals a block.
+    # A human duration ('2h', '30m') or a number of seconds.
+    block_cooldown: int | None = None
+
+    def handle_block_cooldown(self: "MarketplaceConfig") -> None:
+        if self.block_cooldown is None:
+            return
+        if isinstance(self.block_cooldown, str):
+            try:
+                self.block_cooldown = convert_to_seconds(self.block_cooldown)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                raise ValueError(
+                    f"Marketplace {hilight(self.name)} block_cooldown "
+                    f"{self.block_cooldown} is not recognized."
+                ) from e
+        if isinstance(self.block_cooldown, bool) or not isinstance(self.block_cooldown, int):
+            raise ValueError(
+                f"Marketplace {hilight(self.name)} block_cooldown must be a duration."
+            )
+        if self.block_cooldown < 60:
+            raise ValueError(
+                f"Marketplace {hilight(self.name)} block_cooldown must be at least 1 minute."
+            )
 
     def handle_market_type(self: "MarketplaceConfig") -> None:
         if self.market_type is None:
@@ -627,6 +885,38 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
                 raise RuntimeError(f"Failed to navigate to {url} after 10 attempts. {e}") from e
             time.sleep(5)
             self.goto_url(url, attempt + 1)
+
+    def request_delay_range(
+        self: "Marketplace", item_config: TItemConfig | None = None
+    ) -> Tuple[int, int]:
+        """The [min, max] pause to use between page loads, item first."""
+        delay = getattr(item_config, "request_delay", None) or getattr(
+            getattr(self, "config", None), "request_delay", None
+        )
+        if not delay:
+            return DEFAULT_REQUEST_DELAY
+        return int(delay[0]), int(delay[-1])
+
+    def pace(
+        self: "Marketplace", item_config: TItemConfig | None = None, reason: str = ""
+    ) -> float:
+        """Sleep a random interval before the next request. Returns the delay.
+
+        Uniform rather than fixed on purpose: a metronome is the easiest
+        automation signature there is, and the delay this replaced was a flat
+        five seconds on every page.
+        """
+        low, high = self.request_delay_range(item_config)
+        if high <= 0:
+            return 0.0
+        delay = random.uniform(low, high)
+        if self.logger:
+            self.logger.debug(
+                f"""{hilight("[Pace]", "info")} Waiting {delay:.1f}s before the next """
+                f"""{self.name} request{f" ({reason})" if reason else ""}."""
+            )
+        time.sleep(delay)
+        return delay
 
     def search(self: "Marketplace", item: TItemConfig) -> Generator[Listing, None, None]:
         raise NotImplementedError("Search method must be implemented by subclasses.")

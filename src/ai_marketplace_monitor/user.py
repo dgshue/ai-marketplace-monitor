@@ -169,6 +169,12 @@ class User:
         notification_date = notified if isinstance(notified, str) else notified[0]
         return (datetime.now() - datetime.strptime(notification_date, "%Y-%m-%d %H:%M:%S")).seconds
 
+    def send_alert(self: "User", title: str, message: str) -> bool:
+        """Push a plain operational message (not a listing) to this user."""
+        if self.config.enabled is False:
+            return False
+        return NotificationConfig.send_alert_all(self.config, title, message, logger=self.logger)
+
     def notify(
         self: "User",
         listings: List[Listing],

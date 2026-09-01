@@ -510,6 +510,17 @@
     const info = state.monitorInfo;
     if (state.wsConnected && info && info.available) {
       const act = info.activity || {};
+      // A block outranks everything else the chip could say: while it holds,
+      // no item on that marketplace is searched at all.
+      const blocks = activeBlocks(info);
+      if (blocks.length) {
+        chip.className = "status-chip status-err";
+        chip.textContent = "⛔ " + blocks.map(blockChipLabel).join(" · ");
+        chip.title =
+          blocks.map((b) => b.marketplace + " blocked: " + (b.reason || "")).join("\n") +
+          "\n\nSearches on it are skipped until the cooldown ends. Clear it from the Status page if the block has already lifted.";
+        return;
+      }
       if (info.paused) {
         chip.className = "status-chip status-warn";
         chip.textContent = "⏸ paused";
@@ -1017,11 +1028,17 @@
       { key: "notify", label: "Notify users", type: "text", group: "Notification", advanced: true, column: "right",
         help: "Comma-separated [user.*] names. Default: all users." },
 
-      // ---- Schedule ----
-      { key: "search_interval", label: "Search interval", type: "text", group: "Schedule", advanced: true, column: "right",
-        help: "Duration, e.g. '30m', '1h'. Default: 30 min." },
-      { key: "max_search_interval", label: "Max search interval", type: "text", advanced: true, column: "right",
-        help: "Upper bound for random interval jitter." },
+      // ---- Pacing & block safety ----
+      { key: "request_delay", label: "Delay between page loads (seconds)", type: "text", group: "Pacing & block safety", column: "right",
+        help: "Two numbers, e.g. '6, 15'. The monitor waits a random time in that range before every Facebook page load — a search page or a listing page. Default: 6 to 15 seconds. Lower it and blocks get likely; a fixed value (e.g. '10, 10') is worse than a range, because a metronome is the easiest bot signature there is." },
+      { key: "block_cooldown", label: "Pause after a block", type: "text", column: "right",
+        help: "How long to stop searching Facebook entirely once it serves a block page ('You're temporarily blocked', a checkpoint, or a bounce to login). Default: 2h, doubling for repeat blocks up to 8h. You get one notification, and the Status page offers 'Clear block' if you know the block has lifted." },
+
+      // ---- Schedule (defaults every item inherits) ----
+      { key: "search_interval", label: "Search every (minimum)", type: "text", group: "Schedule", column: "right",
+        help: "Default cadence for every item that does not set its own. Duration, e.g. '30m', '1h'. Default: 30 min." },
+      { key: "max_search_interval", label: "… and at most", type: "text", column: "right",
+        help: "Upper bound for the random interval jitter. Default: 1 hour." },
       { key: "start_at", label: "Start at", type: "text", advanced: true, column: "right",
         help: "Comma-separated time patterns: 'HH:MM', '*:MM', '*:*:SS'." },
     ],
@@ -1178,11 +1195,14 @@
       { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
       { key: "rating_prompt", label: "Rating prompt", type: "textarea", column: "right", advanced: true },
-      { key: "search_interval", label: "Search interval", type: "text", group: "Schedule", column: "right", advanced: true,
-        help: "Duration, e.g. '30m', '1h'." },
-      { key: "max_search_interval", label: "Max search interval", type: "text", column: "right", advanced: true },
+      { key: "search_interval", label: "Search every (minimum)", type: "text", group: "Schedule", column: "right",
+        help: "Duration, e.g. '45m', '2h', '1d'. Blank inherits the marketplace value (30m by default). Every search phrase on this item is its own page load, so a six-phrase item searched every 30 minutes is 288 page loads a day — enough to get an account temporarily blocked." },
+      { key: "max_search_interval", label: "… and at most", type: "text", column: "right",
+        help: "Upper bound for the random wait. Set it higher than the minimum and the monitor picks a fresh random interval every cycle, so its requests never form a detectable pattern. Blank inherits the marketplace value (1h by default)." },
+      { key: "request_delay", label: "Delay between page loads (seconds)", type: "text", column: "right", advanced: true,
+        help: "Two numbers, e.g. '6, 15' — a random pause in that range before each page load for this item. Blank inherits the marketplace setting." },
       { key: "start_at", label: "Start at", type: "text", column: "right", advanced: true,
-        help: "Comma-separated time patterns." },
+        help: "Comma-separated time patterns: 'HH:MM', '*:MM', '*:*:SS'. Setting this replaces the interval above with fixed clock times — which is more predictable to Facebook, so prefer the randomized interval unless you need a specific hour." },
     ],
 
     // ---- User form ----
@@ -1930,6 +1950,107 @@
     return String(value);
   };
 
+  // ---- Search cadence -------------------------------------------------
+  // The backend takes either a bare number of seconds or a human duration
+  // ('45m', '2h', '1d'), parsed by convert_to_seconds. This mirrors the cases
+  // a config actually uses so the card can show the real cadence rather than
+  // echoing back whatever string was typed.
+  const DURATION_UNITS = {
+    s: 1, sec: 1, secs: 1, second: 1, seconds: 1,
+    m: 60, min: 60, mins: 60, minute: 60, minutes: 60,
+    h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600,
+    d: 86400, day: 86400, days: 86400,
+    w: 604800, week: 604800, weeks: 604800,
+  };
+
+  const parseDuration = (value) => {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "number") return Number.isFinite(value) ? Math.round(value) : null;
+    const text = String(value).trim().toLowerCase();
+    if (/^\d+$/.test(text)) return parseInt(text, 10);
+    const re = /(\d+(?:\.\d+)?)\s*([a-z]+)/g;
+    let total = 0;
+    let matched = false;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const unit = DURATION_UNITS[m[2]];
+      if (unit === undefined) return null;
+      total += parseFloat(m[1]) * unit;
+      matched = true;
+    }
+    return matched ? Math.round(total) : null;
+  };
+
+  // Compact and exact -- '2h', not '1.9h'. Only whole units collapse.
+  const fmtCadence = (seconds) => {
+    if (seconds === null || seconds === undefined) return "?";
+    if (seconds >= 86400 && seconds % 86400 === 0) return seconds / 86400 + "d";
+    if (seconds >= 3600 && seconds % 3600 === 0) return seconds / 3600 + "h";
+    if (seconds >= 60 && seconds % 60 === 0) return seconds / 60 + "m";
+    return seconds + "s";
+  };
+
+  // Defaults from monitor.py schedule_jobs: 30 minutes, jittered up to an hour.
+  const DEFAULT_SEARCH_INTERVAL = 30 * 60;
+  const DEFAULT_MAX_SEARCH_INTERVAL = 60 * 60;
+
+  // First marketplace section that sets the key, mirroring the backend's
+  // "item value, else marketplace value, else default" precedence.
+  const marketplaceScheduleValue = (key) => {
+    for (const mk of state.sections.filter((x) => x.prefix === "marketplace")) {
+      const v = fieldsForSection(mk)[key];
+      if (v !== undefined && v !== null && v !== "") return v;
+    }
+    return null;
+  };
+
+  // What the scheduler will actually do with this item, and where it came from.
+  const itemCadence = (fields) => {
+    const startAt = fields.start_at ? [].concat(fields.start_at) : null;
+    const ownMin = fields.search_interval;
+    const ownMax = fields.max_search_interval;
+    const mkMin = marketplaceScheduleValue("search_interval");
+    const mkMax = marketplaceScheduleValue("max_search_interval");
+    const source =
+      ownMin || ownMax ? "item" : mkMin || mkMax ? "marketplace" : "default";
+    const min = Math.max(
+      parseDuration(ownMin) || parseDuration(mkMin) || DEFAULT_SEARCH_INTERVAL,
+      1
+    );
+    const max = Math.max(
+      parseDuration(ownMax) || parseDuration(mkMax) || DEFAULT_MAX_SEARCH_INTERVAL,
+      min
+    );
+    let label;
+    if (startAt && startAt.length) {
+      label = "at " + startAt.join(", ");
+    } else if (min === max) {
+      label = "every " + fmtCadence(min);
+    } else {
+      label = "every " + fmtCadence(min) + "–" + fmtCadence(max);
+    }
+    return { min, max, source, startAt, label };
+  };
+
+  // ---- Marketplace block state ----------------------------------------
+  // /api/monitor/state reports only cooldowns that have not expired, but the
+  // payload can be up to ten seconds stale, so re-check `until` here too.
+  const activeBlocks = (info, now) => {
+    const blocked = (info && info.blocked) || {};
+    const t = now === undefined || now === null ? Date.now() / 1000 : now;
+    return Object.keys(blocked)
+      .map((k) => blocked[k])
+      .filter((b) => b && (b.until || 0) > t)
+      .sort((a, b) => (b.until || 0) - (a.until || 0));
+  };
+
+  const blockChipLabel = (blk) => {
+    const retry = new Date((blk.until || 0) * 1000);
+    const hh = String(retry.getHours()).padStart(2, "0");
+    const mm = String(retry.getMinutes()).padStart(2, "0");
+    return (blk.marketplace || "marketplace") + ": blocked · retry " + hh + ":" + mm;
+  };
+
   // Guidance for the inline controls. The per-field `help:` strings in
   // FORM_SCHEMAS cover the modal; these cover the card, and carry the "why"
   // that the schema hints never had room for.
@@ -1957,6 +2078,10 @@
     sources: {
       hint: "Which configured marketplaces this item is searched on. All of them when none is picked.",
       ex: "eBay ships nationwide so distance matters less there; Facebook is local pickup, where a tighter radius pays off.",
+    },
+    cadence: {
+      hint: "How often this item is searched. Each search phrase is a separate page load, so an item with six phrases costs six page loads every time it runs — which is how accounts land in Facebook jail.",
+      ex: "Leave the two boxes different and the monitor picks a fresh random wait in between on every cycle, so the searches never form a pattern. Six phrases: 2h to 4h. One phrase: 1h to 2h. Blank inherits from the marketplace (30m–60m by default).",
     },
     enabled: {
       hint: "Paused items keep their history and settings but are not searched.",
@@ -2076,6 +2201,16 @@
 
     const priceVal = (v) => (v == null ? "" : String(v).replace(/USD/i, "").trim());
 
+    const cadence = itemCadence(fields);
+    const cadenceNote = cadence.startAt
+      ? "fixed times from Start at (advanced) — intervals ignored"
+      : cadence.source === "item"
+        ? "set on this item"
+        : cadence.source === "marketplace"
+          ? "inherited from the marketplace"
+          : "default (no interval set anywhere)";
+    const durVal = (v) => (v === undefined || v === null ? "" : String(v));
+
     return `
     <div class="item-card icard ${open ? "open" : ""} ${enabled ? "" : "disabled"}" data-section="${esc(
       section.name
@@ -2088,6 +2223,7 @@
           ${sum ? `<span><b>${sum.examined}</b> examined</span>
                   <span class="hit"><b>${sum.promising}</b> promising</span>` : ""}
           <span>notify ≥ <b>${effective}</b></span>
+          <span class="icadence">${esc(cadence.label)}</span>
           <span class="sw ${enabled ? "on" : ""}" data-toggle="enabled" title="${
       enabled ? "Pause this item" : "Enable this item"
     }"><i></i></span>
@@ -2150,6 +2286,23 @@
           <div class="fld">
             <div class="inrow">${sources || '<span class="thr-note">no marketplaces configured</span>'}</div>
             ${helpBlock("sources")}
+          </div>
+        </div>
+
+        <div class="irow">
+          <div class="lab">How often to search</div>
+          <div class="fld">
+            <div class="inrow">
+              <input type="text" class="w90" data-field="search_interval" value="${esc(
+                durVal(fields.search_interval)
+              )}" placeholder="30m" autocomplete="off" />
+              <span class="range-sep">to</span>
+              <input type="text" class="w90" data-field="max_search_interval" value="${esc(
+                durVal(fields.max_search_interval)
+              )}" placeholder="1h" autocomplete="off" />
+              <span class="thr-note">${esc(cadence.label)} — ${esc(cadenceNote)}</span>
+            </div>
+            ${helpBlock("cadence")}
           </div>
         </div>
 
@@ -3029,11 +3182,15 @@
     const fb = info.fb_session || {};
     const now = Date.now() / 1000;
 
+    const blocks = activeBlocks(info, now);
     let monDot = "ok";
     let monText = "Idle";
     if (!info.available) {
       monDot = "dim";
       monText = "Not attached";
+    } else if (blocks.length) {
+      monDot = "err";
+      monText = "Blocked by " + blocks.map((b) => b.marketplace).join(", ");
     } else if (info.paused) {
       monDot = "warn";
       monText = "Paused";
@@ -3167,8 +3324,66 @@
             .join("")
         : "";
 
-    host.innerHTML = tiles + scheduleTable + countTable + env;
+    host.innerHTML = tiles + renderBlockNotice(info, now) + scheduleTable + countTable + env;
   };
+
+  // Rendered as its own section rather than a fifth stat tile: it is an
+  // action, not a number, and it should only exist while it applies.
+  const renderBlockNotice = (info, now) => {
+    const blocks = activeBlocks(info, now);
+    if (!blocks.length) return "";
+    const t = now === undefined || now === null ? Date.now() / 1000 : now;
+    return (
+      `<div class="status-section">Blocked marketplaces</div>` +
+      `<table class="status-table"><thead><tr><th>Marketplace</th><th>Signal</th>` +
+      `<th>Retry</th><th></th></tr></thead><tbody>` +
+      blocks
+        .map(
+          (b) => `<tr>
+            <td>${esc(b.marketplace || "")}</td>
+            <td>${esc(b.reason || "unknown")}</td>
+            <td>in ${esc(fmtDur((b.until || t) - t))}${
+              b.strikes > 1 ? ` · strike ${b.strikes}` : ""
+            }</td>
+            <td><button class="ghost small" data-clear-block="${esc(
+              b.marketplace || ""
+            )}">Clear block / retry now</button></td>
+          </tr>`
+        )
+        .join("") +
+      `</tbody></table>`
+    );
+  };
+
+  // Exposed for the QA harness: these decide whether the monitor is reported
+  // as blocked, and are worth asserting without provoking a real block.
+  window.__aimm = Object.assign(window.__aimm || {}, {
+    parseDuration,
+    fmtCadence,
+    activeBlocks,
+    blockChipLabel,
+    renderBlockNotice,
+  });
+
+  const statusBody = $("#status-body");
+  if (statusBody) {
+    statusBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-clear-block]");
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        const res = await api("/api/monitor/clear-block", {
+          method: "POST",
+          body: JSON.stringify({ marketplace: btn.dataset.clearBlock }),
+        });
+        if (res.ok) await loadMonitorState();
+      } catch (err) {
+        console.error(err);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
 
   $$(".verdict-chips .chip").forEach((chip) => {
     chip.addEventListener("click", () => {

@@ -17,7 +17,14 @@ from rich.prompt import Prompt
 from .ai import AIBackend, AIResponse
 from .config import Config, supported_ai_backends, supported_marketplaces
 from .listing import Listing
-from .marketplace import Marketplace, TItemConfig, TMarketplaceConfig
+from .marketplace import (
+    DEFAULT_BLOCK_COOLDOWN,
+    BlockTracker,
+    Marketplace,
+    MarketplaceBlockedError,
+    TItemConfig,
+    TMarketplaceConfig,
+)
 from .notification import NotificationStatus
 from .user import User
 from .utils import (
@@ -32,6 +39,8 @@ from .utils import (
     counter,
     doze,
     hilight,
+    read_monitor_state,
+    write_monitor_state,
 )
 
 
@@ -74,9 +83,19 @@ class MarketplaceMonitor:
             "since": time.time(),
         }
         self.started_at = time.time()
+        # Marketplaces sitting out a block cooldown. Written by the monitor
+        # thread, read by the web thread; see BlockTracker for the locking.
+        self.block_tracker = BlockTracker()
         self.playwright: Playwright = sync_playwright().start()
         self.browser: Browser | None = None
         self.logger = logger
+        # Restore the pause and any cooldown *here*, in the constructor, so
+        # they are in force before the browser launches and before
+        # start_monitor's "run every job once" pass. Both used to live only in
+        # memory, which meant every restart -- and every container recreation
+        # on deploy -- silently resumed searching a marketplace that had just
+        # blocked the account. Last in __init__ so the log lines have a logger.
+        self._restore_persisted_state()
 
     def load_config_file(self: "MarketplaceMonitor") -> Config:
         """Load the configuration file."""
@@ -208,6 +227,45 @@ class MarketplaceMonitor:
                     )
                 continue
 
+    def _restore_persisted_state(self: "MarketplaceMonitor") -> None:
+        """Reload the pause flag and block cooldowns written by a previous run."""
+        data = read_monitor_state()
+        if data.get("paused"):
+            self.web_paused.set()
+            if self.logger:
+                self.logger.warning(
+                    f"""{hilight("[Pause]", "info")} Restoring the paused state from the """
+                    "last run — no search will run until you resume."
+                )
+        self.block_tracker.restore(data.get("blocked"))
+        for name, state in self.block_tracker.snapshot().items():
+            if self.logger:
+                self.logger.warning(
+                    f"""{hilight("[Blocked]", "fail")} {hilight(name)} is still in cooldown """
+                    f"""from a previous run ({state["reason"]}); """
+                    f"""retrying in {humanize.naturaldelta(state["remaining"])}."""
+                )
+
+    def _persist_state(self: "MarketplaceMonitor") -> None:
+        """Write the pause flag and block cooldowns so a restart honors them."""
+        written = write_monitor_state(
+            {
+                "paused": self.web_paused.is_set(),
+                "blocked": self.block_tracker.to_dict(),
+                "updated_at": time.time(),
+            }
+        )
+        if not written and self.logger:
+            self.logger.debug("Could not persist monitor state; it will not survive a restart.")
+
+    def set_paused(self: "MarketplaceMonitor", paused: bool) -> None:
+        """Pause or resume scheduled searches, durably."""
+        if paused:
+            self.web_paused.set()
+        else:
+            self.web_paused.clear()
+        self._persist_state()
+
     def search_item(
         self: "MarketplaceMonitor",
         marketplace_config: TMarketplaceConfig,
@@ -221,11 +279,87 @@ class MarketplaceMonitor:
                     f"""{hilight("[Pause]", "info")} Monitoring paused — skipping scheduled search for {hilight(item_config.name)}."""
                 )
             return
+        # A blocked marketplace is skipped, not unscheduled: the job keeps
+        # ticking so next-run times stay honest and the first search after the
+        # cooldown needs no rescheduling.
+        blocked = self.block_tracker.active(marketplace_config.name)
+        if blocked is not None:
+            if self.logger:
+                self.logger.info(
+                    f"""{hilight("[Blocked]", "fail")} Skipping {hilight(item_config.name)} on """
+                    f"""{hilight(marketplace_config.name)} — retrying in """
+                    f"""{humanize.naturaldelta(blocked.remaining())}."""
+                )
+            return
         self.set_web_activity("searching", item_config.name)
         try:
             self._search_item_impl(marketplace_config, marketplace, item_config)
+        except MarketplaceBlockedError as e:
+            self.enter_block(marketplace_config, e.reason)
         finally:
             self.set_web_activity("idle")
+
+    def enter_block(
+        self: "MarketplaceMonitor", marketplace_config: TMarketplaceConfig, reason: str
+    ) -> None:
+        """Start a cooldown on a marketplace and tell the user once."""
+        cooldown = getattr(marketplace_config, "block_cooldown", None) or DEFAULT_BLOCK_COOLDOWN
+        state = self.block_tracker.block(marketplace_config.name, reason, cooldown)
+        retry_at = time.strftime("%H:%M", time.localtime(state.until))
+        if self.logger:
+            self.logger.error(
+                f"""{hilight("[Blocked]", "fail")} {hilight(marketplace_config.name)} """
+                f"""blocked us ({reason}). Pausing every search on it for """
+                f"""{humanize.naturaldelta(state.remaining())} (retry around {retry_at}).""",
+                extra=aimm_event(
+                    "marketplace_blocked",
+                    marketplace=marketplace_config.name,
+                    reason=reason,
+                    until=state.until,
+                    strikes=state.strikes,
+                ),
+            )
+        self._persist_state()
+        self._notify_block(marketplace_config.name, state.reason, retry_at, state.remaining())
+
+    def _notify_block(
+        self: "MarketplaceMonitor",
+        marketplace_name: str,
+        reason: str,
+        retry_at: str,
+        remaining: float,
+    ) -> None:
+        """One alert per block, to every configured user — not one per item."""
+        if self.config is None:
+            return
+        title = f"{marketplace_name} blocked the monitor"
+        message = (
+            f"{marketplace_name} answered with a block page ({reason}).\n\n"
+            f"All searches on {marketplace_name} are paused for "
+            f"{humanize.naturaldelta(remaining)} and will resume around {retry_at}.\n\n"
+            "If the block has already lifted, use the Clear block button in the web UI "
+            "to retry now. If it keeps happening, raise the search intervals and "
+            "request_delay for your busiest items."
+        )
+        for user_name in self.config.user:
+            try:
+                User(self.config.user[user_name], logger=self.logger).send_alert(title, message)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug(f"Could not alert {user_name} about the block: {e}")
+
+    def clear_block(self: "MarketplaceMonitor", marketplace: str | None = None) -> List[str]:
+        """Drop a cooldown early, for when the user knows the jail lifted."""
+        cleared = self.block_tracker.clear(marketplace)
+        self._persist_state()
+        if cleared and self.logger:
+            self.logger.info(
+                f"""{hilight("[Blocked]", "succ")} Block cleared for """
+                f"""{hilight(", ".join(cleared))}; searches resume on their next scheduled run."""
+            )
+        return cleared
 
     def set_web_activity(self: "MarketplaceMonitor", state: str, item: str | None = None) -> None:
         self.web_activity = {"state": state, "item": item, "since": time.time()}
@@ -252,6 +386,12 @@ class MarketplaceMonitor:
             "started_at": self.started_at,
             "browser_active": self.browser is not None,
             "jobs": sorted(jobs, key=lambda j: j["next_run"] or "~"),
+            # Only marketplaces still inside a cooldown appear here, so the UI
+            # can treat a non-empty dict as "something is blocked right now".
+            "blocked": self.block_tracker.snapshot(),
+            # What a restart would restore. Equal to `paused` in normal
+            # operation; a mismatch means the state file could not be written.
+            "paused_persisted": bool(read_monitor_state().get("paused")),
         }
 
     def _search_item_impl(
