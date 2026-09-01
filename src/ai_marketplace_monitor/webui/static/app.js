@@ -934,6 +934,7 @@
 
   const FORM_SCHEMAS = {
     "marketplace.facebook": [
+      { key: "enabled", label: "Enabled", type: "checkbox", headerToggle: true },
       // ---- Left column: Facebook-specific ----
       { key: "username", label: "Facebook username (email)", type: "text", column: "left",
         help: "Your Facebook login email." },
@@ -1099,11 +1100,11 @@
       { key: "ai", label: "AI backends", type: "text", group: "AI evaluation", column: "right", advanced: true },
       { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
-      { key: "enabled", label: "Enabled", type: "checkbox", group: "Status", column: "right" },
+      { key: "enabled", label: "Enabled", type: "checkbox", headerToggle: true },
     ],
 
     "marketplace.depop": [
-      { key: "enabled", label: "Enabled", type: "checkbox", column: "left" },
+      { key: "enabled", label: "Enabled", type: "checkbox", headerToggle: true },
       { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "left",
         options: [
           { value: "", label: "Default (3)" },
@@ -1120,7 +1121,7 @@
     ],
 
     "marketplace.poshmark": [
-      { key: "enabled", label: "Enabled", type: "checkbox", column: "left" },
+      { key: "enabled", label: "Enabled", type: "checkbox", headerToggle: true },
       { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "left",
         options: [
           { value: "", label: "Default (3)" },
@@ -1291,6 +1292,11 @@
       $("#form-error").hidden = true;
       const form = $("#section-form");
       if (form) form.innerHTML = "";
+      const toggle = $("#form-modal-toggle");
+      if (toggle) {
+        toggle.innerHTML = "";
+        toggle.hidden = true;
+      }
     },
   };
 
@@ -1346,6 +1352,34 @@
     }
     form.appendChild(nameWrapper);
 
+    // A `headerToggle` field is lifted out of the grid into the modal header.
+    // It still carries data-key, so collectFormValues finds it either way.
+    const headerHost = $("#form-modal-toggle");
+    const headerField = schema.find((f) => f.headerToggle);
+    if (headerHost) {
+      headerHost.innerHTML = "";
+      headerHost.hidden = !headerField;
+      if (headerField) {
+        const raw = fields[headerField.key];
+        const on =
+          raw === undefined || raw === null || raw === ""
+            ? headerField.default !== false
+            : String(raw).toLowerCase() !== "false";
+        const label = document.createElement("label");
+        label.innerHTML =
+          `<span>${esc(headerField.label)}</span>` +
+          `<input type="checkbox" id="field-${esc(headerField.key)}" ${on ? "checked" : ""} />` +
+          `<span class="sw ${on ? "on" : ""}"><i></i></span>`;
+        const box = label.querySelector("input");
+        box.dataset.key = headerField.key;
+        box.name = "aimm_" + headerField.key;
+        box.autocomplete = "off";
+        const pip = label.querySelector(".sw");
+        box.addEventListener("change", () => pip.classList.toggle("on", box.checked));
+        headerHost.appendChild(label);
+      }
+    }
+
     const hasColumns = schema.some((f) => f.column);
     const hasAdvanced = schema.some((f) => f.advanced);
 
@@ -1390,9 +1424,10 @@
     }
 
     // Toggle for advanced fields.
+    const gridFields = schema.filter((f) => !f.headerToggle);
     const visibleFields = hasColumns
-      ? schema.filter((f) => (f.column || "left") === activeTab)
-      : schema;
+      ? gridFields.filter((f) => (f.column || "left") === activeTab)
+      : gridFields;
     const tabHasAdvanced = visibleFields.some((f) => f.advanced);
     if (tabHasAdvanced) {
       const toggle = document.createElement("label");
@@ -1545,15 +1580,53 @@
 
   };
 
+  // Config keys the backend types as a list, so a comma in them is a
+  // separator. Everywhere else a comma is punctuation: splitting it turned
+  // home_location = "Asheboro, NC" into ["Asheboro", "NC"], which the
+  // validator rejects ("home_location must be a non-empty string"). A schema
+  // field can also opt in with `list: true`.
+  const LIST_VALUED_KEYS = new Set([
+    "ai",
+    "antikeywords",
+    "availability",
+    "buying_options",
+    "city_name",
+    "condition",
+    "currency",
+    "date_listed",
+    "delivery_method",
+    "email",
+    "exclude_sellers",
+    "keywords",
+    "marketplace",
+    "notify",
+    "notify_with",
+    "radius",
+    "rating",
+    "request_delay",
+    "search_city",
+    "search_phrases",
+    "search_region",
+    "seller_locations",
+    "start_at",
+  ]);
+
+  const fieldIsList = (fieldDef, currentValue) =>
+    fieldDef.list === true ||
+    fieldDef.type === "checkboxes" ||
+    LIST_VALUED_KEYS.has(fieldDef.key) ||
+    Array.isArray(currentValue);
+
   // Collect form field values into a {key: coerced_value} dict.
   const collectFormValues = () => {
-    const form = $("#section-form");
     const errors = [];
     const values = {};
 
     formContext.schema.forEach((fieldDef) => {
       if (fieldDef.advanced && !showAdvanced) return;
-      const input = form.querySelector(`[data-key="${fieldDef.key}"]`);
+      // Scope the lookup to the whole modal, not just the form: a
+      // headerToggle field renders in the modal header, outside <form>.
+      const input = formModal.el().querySelector(`[data-key="${fieldDef.key}"]`);
       if (!input) return;
 
       let newVal;
@@ -1562,6 +1635,20 @@
           (cb) => cb.value
         );
         newVal = checked.length ? checked.join(", ") : "";
+      } else if (fieldDef.type === "checkbox") {
+        // A single checkbox carries its state in .checked, not .value —
+        // reading .value here is what wrote enabled = "true" as a quoted
+        // string. Absent means "on" throughout the config, so only write the
+        // key when it is being turned off or when it was already written;
+        // that keeps a fresh section's TOML clean and leaves add-mode
+        // defaults (which derive `enabled` from the other fields) in charge.
+        const on = !!input.checked;
+        const had = Object.prototype.hasOwnProperty.call(
+          formContext.fields || {}, fieldDef.key
+        );
+        if (on && !had) return;
+        values[fieldDef.key] = on;
+        return;
       } else {
         newVal = input.value.trim();
       }
@@ -1583,22 +1670,20 @@
         // validator, which wants an integer. Coerce explicitly-marked fields.
         value = parseInt(newVal, 10);
         if (isNaN(value)) { errors.push(`${fieldDef.label} must be a number.`); return; }
+      } else if (
+        newVal.includes(",") &&
+        fieldIsList(fieldDef, (formContext.fields || {})[fieldDef.key])
+      ) {
+        value = newVal.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!fieldDef.keepString && value.every((x) => /^-?\d+$/.test(x))) {
+          value = value.map((x) => parseInt(x, 10)); // e.g. radius wants ints
+        }
       } else if (!fieldDef.keepString && /^-?\d+$/.test(newVal) && !newVal.includes(",")) {
         // An integer doesn't wear quotes. Bare-integer text becomes a TOML
         // int — the backend coerces int→str where it wants strings (prices),
         // and fields that MUST stay strings (search_city: the validator
         // rejects non-strings) carry keepString in their schema.
         value = parseInt(newVal, 10);
-      } else if (newVal.includes(",") && fieldDef.type === "text") {
-        const original = formContext.fields[fieldDef.key];
-        if (Array.isArray(original) || newVal.includes(",")) {
-          value = newVal.split(",").map((s) => s.trim()).filter(Boolean);
-          if (!fieldDef.keepString && value.every((x) => /^-?\d+$/.test(x))) {
-            value = value.map((x) => parseInt(x, 10)); // e.g. radius wants ints
-          }
-        } else {
-          value = newVal;
-        }
       } else {
         value = newVal;
       }

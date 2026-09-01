@@ -581,6 +581,35 @@ with sync_playwright() as p:
     pg.wait_for_timeout(300)
 
     # --- available sources appear with Set up, prefilled to the right type ---
+    # The block below exercises the eBay *add* path, which needs the section
+    # absent. Browser mode needs no keys, so a real config may well already
+    # have [marketplace.ebay] on disk -- drop it from the buffer and save, and
+    # let the snapshot restore at the end of the block put it back.
+    if "marketplace.ebay" in pg.eval_on_selector_all(
+        "[data-edit-section]", "e=>e.map(x=>x.dataset.editSection)"
+    ):
+        pg.evaluate(
+            """() => {
+              const cm = document.querySelector('.CodeMirror').CodeMirror;
+              const nl = String.fromCharCode(10);
+              const lines = cm.getValue().split(nl);
+              const start = lines.findIndex((l) => l.trim() === '[marketplace.ebay]');
+              if (start < 0) return;
+              let end = start + 1;
+              while (end < lines.length && !lines[end].trim().startsWith('[')) end++;
+              lines.splice(start, end - start);
+              cm.setValue(lines.join(nl));
+            }"""
+        )
+        pg.wait_for_timeout(700)
+        if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
+            pg.click("#save-btn")
+            pg.wait_for_timeout(1500)
+        check(
+            "configured ebay temporarily removed for the add-path test",
+            not pg.query_selector("[data-edit-section='marketplace.ebay']"),
+            pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
+        )
     avail = pg.eval_on_selector_all(
         ".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)"
     )
@@ -781,6 +810,117 @@ with sync_playwright() as p:
         pg.click("#save-btn")
         pg.wait_for_timeout(1500)
     check("disk restored after setup sweep", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+
+    # ---------- provider form: header switch, boolean enabled, comma-safe text ----------
+    def fb_seg():
+        return pg.evaluate(
+            "document.querySelector('.CodeMirror').CodeMirror.getValue()"
+            ".split('[marketplace.facebook]')[1].split(String.fromCharCode(10)+'[')[0]"
+        )
+
+    pg.click("[data-edit-section='marketplace.facebook']")
+    pg.wait_for_timeout(600)
+    check(
+        "enabled switch lives in the modal header",
+        bool(pg.query_selector("#form-modal-toggle input[data-key=enabled]"))
+        and not pg.eval_on_selector("#form-modal-toggle", "e=>e.hidden"),
+    )
+    check(
+        "enabled is gone from the field grid",
+        pg.eval_on_selector_all("#section-form [data-key=enabled]", "e=>e.length") == 0,
+    )
+    # A comma in a plain text field is punctuation. Splitting it wrote
+    # home_location = ["Asheboro", "NC"], which the validator rejects.
+    pg.click(".form-tab-bar .form-tab:nth-child(2)")
+    pg.wait_for_timeout(350)
+    pg.click("#field-home_location")
+    pg.fill("#field-home_location", "Asheboro, NC")
+    # ...while a genuinely list-valued field with commas must still split.
+    pg.click("#field-search_city")
+    pg.fill("#field-search_city", "asheboro, greensboro")
+    pg.click("#form-save")
+    pg.wait_for_timeout(1800)
+    seg_fb = fb_seg()
+
+    def line_for(seg, key):
+        hits = [ln for ln in seg.splitlines() if ln.strip().startswith(key)]
+        return hits[0] if hits else ""
+
+    loc_line = line_for(seg_fb, "home_location")
+    check(
+        "comma text stays a quoted string",
+        '"Asheboro, NC"' in loc_line and "[" not in loc_line,
+        loc_line,
+    )
+    city_line = line_for(seg_fb, "search_city")
+    check(
+        "comma list still becomes an array",
+        "[" in city_line and "asheboro" in city_line and "greensboro" in city_line,
+        city_line,
+    )
+    check(
+        "comma-text save persisted (config still valid)",
+        pg.eval_on_selector("#save-btn", "e=>e.disabled"),
+        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:90],
+    )
+    # Restore before touching enabled, so a failure below cannot leave two
+    # cities on disk.
+    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
+    pg.wait_for_timeout(700)
+    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
+        pg.click("#save-btn")
+        pg.wait_for_timeout(1500)
+    check("disk restored after comma test", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+
+    # `enabled` must serialize as a bare boolean, not the string "true".
+    # Exercised on eBay: switching Facebook off, even briefly, is not worth it.
+    def ebay_seg():
+        return pg.evaluate(
+            "document.querySelector('.CodeMirror').CodeMirror.getValue()"
+            ".split('[marketplace.ebay]')[1].split(String.fromCharCode(10)+'[')[0]"
+        )
+
+    if pg.query_selector("[data-edit-section='marketplace.ebay']"):
+        pg.click("[data-edit-section='marketplace.ebay']")
+        pg.wait_for_timeout(600)
+        pg.eval_on_selector(
+            "#form-modal-toggle input[data-key=enabled]",
+            "e=>{ e.checked = false; e.dispatchEvent(new Event('change')); }",
+        )
+        pg.click("#form-save")
+        pg.wait_for_timeout(1800)
+        en_line = line_for(ebay_seg(), "enabled")
+        check(
+            "enabled writes a bare boolean",
+            "false" in en_line and '"' not in en_line,
+            en_line,
+        )
+        pg.click("[data-edit-section='marketplace.ebay']")
+        pg.wait_for_timeout(600)
+        check(
+            "header switch reflects the saved false",
+            not pg.eval_on_selector("#form-modal-toggle input[data-key=enabled]", "e=>e.checked"),
+        )
+        pg.eval_on_selector(
+            "#form-modal-toggle input[data-key=enabled]",
+            "e=>{ e.checked = true; e.dispatchEvent(new Event('change')); }",
+        )
+        pg.click("#form-save")
+        pg.wait_for_timeout(1800)
+        en_line2 = line_for(ebay_seg(), "enabled")
+        check(
+            "enabled toggles back to a bare true",
+            "true" in en_line2 and '"' not in en_line2,
+            en_line2,
+        )
+    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
+    pg.wait_for_timeout(700)
+    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
+        pg.click("#save-btn")
+        pg.wait_for_timeout(1500)
+    check(
+        "disk restored after provider-form test", pg.eval_on_selector("#save-btn", "e=>e.disabled")
+    )
     pg.screenshot(path="/tmp/qa/6-forms.png")
 
     # TOML tab roundtrip

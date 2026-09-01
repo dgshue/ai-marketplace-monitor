@@ -1109,6 +1109,20 @@ html, body {
 .sw.on { background: var(--accent-dim); border-color: var(--accent); }
 .sw.on i { left: 18px; background: #fff; }
 
+/* Whether a source is on is a property of the whole section, not one setting
+   among forty, so it rides in the modal header beside the title. */
+.modal-header-toggle { margin-left: auto; margin-right: 14px; }
+.modal-header-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.modal-header-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.modal-header-toggle input:focus-visible + .sw { outline: 2px solid var(--accent); }
+
 /* Help layer. Hidden entirely at "off" so users who know the tool keep
    today's density. */
 .fieldhelp { display: none; font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-top: 4px; }
