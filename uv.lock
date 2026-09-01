@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -21,7 +21,7 @@ wheels = [
 
 [[package]]
 name = "ai-marketplace-monitor"
-version = "0.10.0"
+version = "0.10.2"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -29,6 +29,7 @@ dependencies = [
     { name = "currencyconverter" },
     { name = "diskcache" },
     { name = "fastapi" },
+    { name = "geonamescache" },
     { name = "humanize" },
     { name = "inflect" },
     { name = "itsdangerous" },
@@ -113,6 +114,7 @@ requires-dist = [
     { name = "diskcache", specifier = ">=5.6.3" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2024.1.29" },
+    { name = "geonamescache", specifier = ">=2.0.0" },
     { name = "humanize", specifier = ">=4.0.0" },
     { name = "inflect", specifier = ">=7.0.0" },
     { name = "invoke", marker = "extra == 'dev'", specifier = ">=2.2.0" },
@@ -148,7 +150,7 @@ requires-dist = [
     { name = "sphinxext-opengraph", marker = "extra == 'docs'", specifier = ">=0.9.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = "==2.2.1" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "typer", specifier = ">=0.15.1,<0.25.0" },
+    { name = "typer", specifier = ">=0.15.1,<0.28.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
     { name = "watchdog", specifier = ">=4.0.0" },
     { name = "watchdog", extras = ["watchmedo"], marker = "extra == 'dev'", specifier = ">=6.0.0" },
@@ -906,6 +908,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d0/69/312cd100fa45ddaea5a588334d2defa331ff427bcb61f5fe2ae61bdc3762/furo-2025.7.19.tar.gz", hash = "sha256:4164b2cafcf4023a59bb3c594e935e2516f6b9d35e9a5ea83d8f6b43808fe91f", size = 1662054, upload-time = "2025-07-19T10:52:09.754Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3a/34/2b07b72bee02a63241d654f5d8af87a2de977c59638eec41ca356ab915cd/furo-2025.7.19-py3-none-any.whl", hash = "sha256:bdea869822dfd2b494ea84c0973937e35d1575af088b6721a29c7f7878adc9e3", size = 342175, upload-time = "2025-07-19T10:52:02.399Z" },
+]
+
+[[package]]
+name = "geonamescache"
+version = "3.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/56/f7/1ca0ac4ca0b7a0f21f6628094a0e4fbfb836508370e8e835294ca125536f/geonamescache-3.0.2.tar.gz", hash = "sha256:1cc7007a7a14637f665c7bd7934dc5a04a973daf4d962d789651047aa1a00cb1", size = 33569006, upload-time = "2026-07-28T11:58:32.578Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/c2/52f1b29de8839b4b55cd2641dfd722a6a94953d74fa82514e26084a92318/geonamescache-3.0.2-py3-none-any.whl", hash = "sha256:b830e8942f2d58c7e68782dcf4dff2ffe8c4104a35ee881ed1ad4023cefcdba4", size = 35000667, upload-time = "2026-07-28T11:53:11.865Z" },
 ]
 
 [[package]]

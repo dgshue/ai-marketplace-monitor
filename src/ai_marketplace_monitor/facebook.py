@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import repeat
 from logging import Logger
-from typing import Any, Generator, List, Tuple, Type, cast
+from typing import Any, ClassVar, Generator, List, Tuple, Type, cast
 from urllib.parse import quote
 
 import humanize
@@ -564,6 +564,7 @@ class FacebookMarketplace(Marketplace):
                             item_config,
                             price=listing.price,
                             title=listing.title,
+                            location=listing.location,
                         )
                         if not from_cache:
                             time.sleep(5)
@@ -602,12 +603,31 @@ class FacebookMarketplace(Marketplace):
                     else:
                         counter.increment(CounterItem.EXCLUDED_LISTING, item_config.name)
 
+    # Values the PDP scraper emits when a selector lands on the wrong node.
+    # Vehicle pages use a different layout from regular items: the price
+    # element is absent ("**unspecified**"), the location selector grabs the
+    # "Seller's description" section header, and the seller selector grabs
+    # the "View seller profile" link text.
+    _JUNK_DETAILS: ClassVar = {
+        "",
+        "**unspecified**",
+        "Seller's description",
+        "View seller profile",
+    }
+
+    def _prefer_tile(self: "FacebookMarketplace", pdp_value: str, tile_value: str | None) -> str:
+        """PDP value unless it is a known junk artifact and the search tile had better."""
+        if (pdp_value or "").strip() in self._JUNK_DETAILS and tile_value:
+            return tile_value
+        return "" if (pdp_value or "").strip() in self._JUNK_DETAILS else pdp_value
+
     def get_listing_details(
         self: "FacebookMarketplace",
         post_url: str,
         item_config: ItemConfig,
         price: str | None = None,
         title: str | None = None,
+        location: str | None = None,
     ) -> Tuple[Listing, bool]:
         assert post_url.startswith("https://www.facebook.com")
         details = Listing.from_cache(post_url)
@@ -632,6 +652,15 @@ class FacebookMarketplace(Marketplace):
                 "The listing might be missing key information (e.g. seller) or not in English."
                 "Please add option language to your marketplace configuration is the latter is the case. See https://github.com/BoPeng/ai-marketplace-monitor?tab=readme-ov-file#support-for-non-english-languages for details."
             )
+        # Merge before caching: the tile is the more reliable source for the
+        # fields vehicle PDPs scramble, and a junk price in the cache also
+        # defeats the price-equality freshness check above, forcing a PDP
+        # re-fetch on every single cycle.
+        details.price = self._prefer_tile(details.price, price)
+        details.title = self._prefer_tile(details.title, title)
+        details.location = self._prefer_tile(details.location, location)
+        details.seller = self._prefer_tile(details.seller, None)
+        details.condition = self._prefer_tile(details.condition, None)
         details.to_cache(post_url)
         return details, False
 

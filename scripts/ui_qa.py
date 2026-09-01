@@ -29,6 +29,21 @@ time.sleep(2)
 os.makedirs("/tmp/qa", exist_ok=True)
 results = []
 
+# ---------- pre-browser unit: tile-preferred detail merge ----------
+from ai_marketplace_monitor.facebook import FacebookMarketplace as _FB
+
+_fb = _FB.__new__(_FB)  # _prefer_tile needs no construction state
+_cases = [
+    (("**unspecified**", "$8,995"), "$8,995"),
+    (("Seller's description", "Winston-Salem, NC"), "Winston-Salem, NC"),
+    (("View seller profile", None), ""),
+    (("$450", "$999"), "$450"),
+    (("", None), ""),
+]
+_ok = all(_fb._prefer_tile(a, b) == want for (a, b), want in _cases)
+print(("PASS " if _ok else "FAIL ") + "tile-preferred merge unit")
+results.append(("tile-preferred merge unit", _ok, ""))
+
 # ---------- pre-browser unit: the drift-proof rating join ----------
 # Reproduces the field-drift failure that hid a notified vehicle: details
 # cached with price '**unspecified**' while the rating was written against
@@ -84,8 +99,8 @@ msgs = []
 with sync_playwright() as p:
     b = p.chromium.launch()
     pg = b.new_page(viewport={"width": 1500, "height": 950})
-    pg.on("console", lambda m: msgs.append((m.type, m.text)))
-    pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e))))
+    pg.on("console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", ""))))
+    pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
 
     # ---------- login ----------
     pg.goto("http://127.0.0.1:8476/", wait_until="load")
@@ -195,6 +210,13 @@ with sync_playwright() as p:
     pg.fill("#activity-filter", "")
     pg.wait_for_timeout(400)
     check("csv button", bool(pg.query_selector("#export-csv-btn")))
+
+    # --- no PDP junk artifacts anywhere in the deals surface ---
+    junk_hits = pg.evaluate(
+        "['**unspecified**', \"Seller's description\", 'View seller profile']"
+        ".map(j => document.body.innerText.includes(j) ? j : null).filter(Boolean)"
+    )
+    check("no junk scrape artifacts rendered", not junk_hits, junk_hits)
 
     # --- media: photo snapshot, pickup map, drive time on a facebook row ---
     picked = pg.evaluate(
@@ -623,14 +645,15 @@ with sync_playwright() as p:
 
     b.close()
 
+# Resource-error console text omits the URL; it rides in the message location.
 errors = [
     (t, m)
-    for t, m in msgs
+    for t, m, url in msgs
     if t in ("error", "PAGEERROR") and "401" not in m
     # expired listing images 404 by design; the img hides itself
-    and "listing-image" not in m
+    and "listing-image" not in m + url
     # OSM tile fetches can transiently fail without breaking the map
-    and "tile.openstreetmap.org" not in m
+    and "tile.openstreetmap.org" not in m + url
 ]
 check("zero console errors", len(errors) == 0, errors[:3])
 
