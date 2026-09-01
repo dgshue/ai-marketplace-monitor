@@ -80,13 +80,17 @@ class EbayItemConfig(ItemConfig, FacebookMarketItemCommonConfig):
     construct here, and one built here would be missing attributes Facebook's
     search reads. Sharing the field set makes the object usable by either
     backend regardless of iteration order; eBay maps `condition` and ignores
-    the rest."""
+    the rest.
+    """
 
 
 @dataclass
 class EbayMarketplaceConfig(MarketplaceConfig):
-    """eBay-specific options. Everything else is inherited and behaves as it
-    does for Facebook -- search_interval, rating, notify, keywords, prices."""
+    """eBay-specific options.
+
+    Everything else is inherited and behaves as it does for Facebook --
+    search_interval, rating, notify, keywords, prices.
+    """
 
     client_id: str | None = None
     client_secret: str | None = None
@@ -199,9 +203,7 @@ class EbayMarketplace(Marketplace):
                 "Create an application key set at https://developer.ebay.com."
             )
 
-        basic = base64.b64encode(
-            f"{config.client_id}:{config.client_secret}".encode()
-        ).decode()
+        basic = base64.b64encode(f"{config.client_id}:{config.client_secret}".encode()).decode()
         response = requests.post(
             OAUTH_URL,
             headers={
@@ -214,9 +216,7 @@ class EbayMarketplace(Marketplace):
         if response.status_code != 200:
             # The body carries eBay's actual reason (bad key, wrong environment,
             # unaccepted agreement); a bare status code sends people hunting.
-            raise ValueError(
-                f"eBay OAuth failed ({response.status_code}): {response.text[:300]}"
-            )
+            raise ValueError(f"eBay OAuth failed ({response.status_code}): {response.text[:300]}")
         payload = response.json()
         self._token = payload["access_token"]
         self._token_expires_at = now + float(payload.get("expires_in", 7200))
@@ -339,7 +339,9 @@ class EbayMarketplace(Marketplace):
                 raise
             except Exception as e:
                 if self.logger:
-                    self.logger.error(f"""{hilight("[Search]", "fail")} eBay request failed: {e}""")
+                    self.logger.error(
+                        f"""{hilight("[Search]", "fail")} eBay request failed: {e}"""
+                    )
                 continue
 
             if response.status_code == 429:

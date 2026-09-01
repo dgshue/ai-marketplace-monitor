@@ -1,7 +1,9 @@
-"""Depop backend — scrapes the server-rendered search page in the shared
-headed Chromium. No login. Extraction ported from secondhand-mcp (MIT):
-Depop's public JSON API (webapi.depop.com) 403s non-browser callers, so tiles
-come from the rendered DOM, keyed off the stable /products/<slug> href."""
+"""Depop backend: scrape the server-rendered search page, no login.
+
+Extraction ported from secondhand-mcp (MIT): Depop's public JSON API
+(webapi.depop.com) 403s non-browser callers, so tiles come from the rendered
+DOM, keyed off the stable /products/<slug> href.
+"""
 
 from __future__ import annotations
 

@@ -34,9 +34,7 @@ Coordinates = Tuple[float, float]
 
 # "35.7, -79.8" -- accepted so a user whose town is missing from the dataset,
 # or who wants a precise origin, can bypass name lookup entirely.
-_LATLON_RE = re.compile(
-    r"^\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$"
-)
+_LATLON_RE = re.compile(r"^\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
 
 # Built once on first use: (lowercase city, state code) -> coordinates, plus a
 # (lowercase city) -> coordinates fallback for strings with no state.

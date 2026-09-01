@@ -8,12 +8,12 @@ from the main thread to that loop via ``loop.call_soon_threadsafe``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import mimetypes
 import os
-import hashlib
 import re
 import secrets
 import socket
@@ -38,7 +38,8 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..utils import amm_home, browser_state_file, cache, CacheType
+from ..utils import CacheType, amm_home, browser_state_file, cache
+from .activity import build_activity
 from .auth import (
     CSRF_COOKIE,
     CSRF_HEADER,
@@ -50,7 +51,6 @@ from .auth import (
     hash_password,
     verify_password,
 )
-from .activity import build_activity
 from .config_api import ConfigFileService
 from .config_auth import extract_credentials
 from .found_export import iter_found_csv, iter_found_rows
@@ -250,7 +250,8 @@ def create_app(
         The SPA's POSTs echo the CSRF cookie in a header, so a proxy-authed
         browser needs the same cookies a password login would set. CSRF checks
         stay mandatory: the SSO cookie rides along on cross-site requests, so
-        proxy auth alone must never authorize a state change."""
+        proxy auth alone must never authorize a state change.
+        """
         response = await call_next(request)
         if SESSION_COOKIE not in request.cookies:
             user = proxy_user(request)
@@ -599,7 +600,7 @@ def create_app(
                 out["logged_in"] = {"c_user", "xs"} <= cookie_names
         except KeyboardInterrupt:
             raise
-        except Exception:
+        except Exception:  # noqa: S110 — a malformed state file reads as absent
             pass
         return out
 
@@ -625,7 +626,7 @@ def create_app(
                         counters.setdefault(key[1], {})[key[2]] = value
         except KeyboardInterrupt:
             raise
-        except Exception:
+        except Exception:  # noqa: S110 — partial counters beat a failed page
             pass
         out["counters"] = counters
         return out
@@ -656,13 +657,16 @@ def create_app(
         _: str = Depends(require_session),
         __: None = Depends(require_csrf),
     ) -> Dict[str, Any]:
-        """Set the user's own state on a listing: my_rank (1-5 or null) and/or
-        hidden. Stored in the diskcache keyed by (marketplace, id) so it joins
-        the same way ratings do — hidden listings stay fully tracked."""
+        """Set the user's own state on a listing.
+
+        my_rank (1-5 or null) and/or hidden, stored in the diskcache keyed by
+        (marketplace, id) so it joins the same way ratings do — hidden
+        listings stay fully tracked.
+        """
         try:
             body = await request.json()
         except Exception:
-            raise HTTPException(status_code=400, detail="JSON body required")
+            raise HTTPException(status_code=400, detail="JSON body required") from None
         marketplace = str(body.get("marketplace") or "").strip()
         listing_id = str(body.get("id") or "").strip()
         if not marketplace or not listing_id:
@@ -754,7 +758,7 @@ def create_app(
             except HTTPException:
                 raise
             except Exception:
-                raise HTTPException(status_code=404, detail="Image fetch failed.")
+                raise HTTPException(status_code=404, detail="Image fetch failed.") from None
         return FileResponse(
             cached,
             media_type="image/jpeg",
@@ -767,9 +771,7 @@ def create_app(
     # so repeated views of the same listing cost nothing.
     # ------------------------------------------------------------------
     @app.get("/api/route")
-    def route_estimate(
-        to: str, _: str = Depends(require_session)
-    ) -> Dict[str, Any]:
+    def route_estimate(to: str, _: str = Depends(require_session)) -> Dict[str, Any]:
         import requests as _requests
 
         from .activity import home_from_config
@@ -807,7 +809,7 @@ def create_app(
         except KeyboardInterrupt:
             raise
         except Exception:
-            raise HTTPException(status_code=502, detail="Routing unavailable.")
+            raise HTTPException(status_code=502, detail="Routing unavailable.") from None
         cache.set(cache_key, {"at": time.time(), "result": result}, tag="route-cache")
         return result
 

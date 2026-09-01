@@ -297,7 +297,9 @@ def build_activity(
             listing_hash = ident
             if rating is None:
                 probe = (
-                    listing if details.get("name") == item else Listing(**{**details, "name": item})
+                    listing
+                    if details.get("name") == item
+                    else Listing(**{**details, "name": item})
                 )
                 legacy_hash = probe.hash
                 if legacy_hash in seen_hashes:
@@ -329,9 +331,7 @@ def build_activity(
                     "image": listing.image or "",
                     # Item coordinates for the pickup map; None when the
                     # location string does not geocode.
-                    "coords": (lambda c: list(c) if c else None)(
-                        resolve(listing.location or "")
-                    ),
+                    "coords": (lambda c: list(c) if c else None)(resolve(listing.location or "")),
                     "distance_mi": distance_from(home, listing.location or ""),
                     "seller": listing.seller,
                     "condition": listing.condition,
@@ -348,7 +348,9 @@ def build_activity(
                     # at all — either way it is off the active radar, and the
                     # default Deals view hides it while keeping it reachable.
                     "item_active": item in per_item_threshold and item not in disabled_items,
-                    "my_rank": user_flags.get((listing.marketplace, listing.id), {}).get("my_rank"),
+                    "my_rank": user_flags.get((listing.marketplace, listing.id), {}).get(
+                        "my_rank"
+                    ),
                     "hidden": bool(
                         user_flags.get((listing.marketplace, listing.id), {}).get("hidden")
                     ),

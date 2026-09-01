@@ -1,7 +1,7 @@
 import os
 import sys
-import time
 import threading
+import time
 from logging import Logger
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List
@@ -66,7 +66,11 @@ class MarketplaceMonitor:
         # thread cannot drive. When set, scheduled searches are skipped but the
         # schedule itself keeps ticking, so next-run times stay truthful.
         self.web_paused = threading.Event()
-        self.web_activity: Dict[str, Any] = {"state": "starting", "item": None, "since": time.time()}
+        self.web_activity: Dict[str, Any] = {
+            "state": "starting",
+            "item": None,
+            "since": time.time(),
+        }
         self.started_at = time.time()
         self.playwright: Playwright = sync_playwright().start()
         self.browser: Browser | None = None
@@ -221,15 +225,16 @@ class MarketplaceMonitor:
         finally:
             self.set_web_activity("idle")
 
-    def set_web_activity(
-        self: "MarketplaceMonitor", state: str, item: str | None = None
-    ) -> None:
+    def set_web_activity(self: "MarketplaceMonitor", state: str, item: str | None = None) -> None:
         self.web_activity = {"state": state, "item": item, "since": time.time()}
 
     def monitor_state(self: "MarketplaceMonitor") -> Dict[str, Any]:
-        """Snapshot for the web UI. Reads shared structures without locking:
-        every field is a whole-object replace, so the worst case is a snapshot
-        one search stale, which the next poll corrects."""
+        """Snapshot for the web UI.
+
+        Reads shared structures without locking: every field is a whole-object
+        replace, so the worst case is a snapshot one search stale, which the
+        next poll corrects.
+        """
         jobs = []
         for job in schedule.get_jobs():
             jobs.append(
@@ -427,7 +432,9 @@ class MarketplaceMonitor:
         for marketplace_config in self.config.marketplace.values():
             if marketplace_config.enabled is False:
                 continue
-            marketplace_class = supported_marketplaces[marketplace_config.market_type or marketplace_config.name]
+            marketplace_class = supported_marketplaces[
+                marketplace_config.market_type or marketplace_config.name
+            ]
             if marketplace_config.name in self.active_marketplaces:
                 marketplace = self.active_marketplaces[marketplace_config.name]
             else:
@@ -446,9 +453,7 @@ class MarketplaceMonitor:
                 if item_config.enabled is False:
                     continue
 
-                if (
-                    item_config.searches_on(marketplace_config.name)
-                ):
+                if item_config.searches_on(marketplace_config.name):
                     # wait for some time before next search
                     # interval (in minutes) can be defined both for the marketplace
                     # if there is any configuration file change, stop sleeping and search again
@@ -744,7 +749,9 @@ class MarketplaceMonitor:
             for marketplace_config in self.config.marketplace.values():
                 if marketplace_config.enabled is False:
                     continue
-                marketplace_class = supported_marketplaces[marketplace_config.market_type or marketplace_config.name]
+                marketplace_class = supported_marketplaces[
+                    marketplace_config.market_type or marketplace_config.name
+                ]
                 if marketplace_config.name in self.active_marketplaces:
                     marketplace = self.active_marketplaces[marketplace_config.name]
                 else:

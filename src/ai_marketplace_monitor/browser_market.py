@@ -45,8 +45,11 @@ def price_number(text: str | None) -> float | None:
 
 @dataclass
 class BrowserItemConfig(ItemConfig, FacebookMarketItemCommonConfig):
-    """Shared item field set so an unbound item constructed by any backend is
-    usable by every other one (see EbayItemConfig for the full rationale)."""
+    """Shared item field set for cross-backend items.
+
+    An unbound item constructed by any backend must be usable by every other
+    one (see EbayItemConfig for the full rationale).
+    """
 
 
 @dataclass
@@ -57,8 +60,11 @@ class BrowserMarketplaceConfig(MarketplaceConfig):
 
 
 class BrowserTileMarketplace(Marketplace):
-    """Search-page tile scraper. Subclasses define the URL, the anchor pattern,
-    and how a raw tile becomes a Listing."""
+    """Search-page tile scraper.
+
+    Subclasses define the URL, the anchor pattern, and how a raw tile becomes
+    a Listing.
+    """
 
     requires_search_city = False
     requires_browser = True
@@ -98,8 +104,8 @@ class BrowserTileMarketplace(Marketplace):
                     return None
                 try:
                     self.page.wait_for_selector(self.anchor_selector, timeout=TILE_WAIT_MS)
-                except Exception:
-                    pass  # SSR content may already be present; extraction decides
+                except Exception:  # noqa: S110 — SSR content may already be present
+                    pass
                 tiles = self.page.evaluate(self.extract_js)
                 if isinstance(tiles, list):
                     return tiles

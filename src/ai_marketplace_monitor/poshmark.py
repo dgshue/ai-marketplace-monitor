@@ -1,6 +1,8 @@
-"""Poshmark backend — scrapes the server-rendered search page in the shared
-headed Chromium. No login. Extraction ported from secondhand-mcp (MIT), keyed
-off the stable /listing/<slug> href rather than styled class names."""
+"""Poshmark backend: scrape the server-rendered search page, no login.
+
+Extraction ported from secondhand-mcp (MIT), keyed off the stable
+/listing/<slug> href rather than styled class names.
+"""
 
 from __future__ import annotations
 

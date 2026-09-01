@@ -1,4 +1,5 @@
 """Full UI QA: every view, every interaction, screenshots. No disk writes."""
+
 import logging
 import os
 import time
@@ -11,14 +12,18 @@ log = logging.getLogger("qa")
 os.environ["FACEBOOK_USERNAME"] = "t@e.com"
 os.environ["FACEBOOK_PASSWORD"] = "pw"
 
-from ai_marketplace_monitor.webui.server import WebUIConfig, start_webui
 from ai_marketplace_monitor.webui.log_handler import LogBroadcastHandler
+from ai_marketplace_monitor.webui.server import WebUIConfig, start_webui
 
 srv, info = start_webui(
-    WebUIConfig(host="0.0.0.0", port=8476,
-                config_files=[Path("/root/.ai-marketplace-monitor/config.toml")],
-                log_handler=LogBroadcastHandler(capacity=50)),
-    logger=log)
+    WebUIConfig(
+        host="0.0.0.0",
+        port=8476,
+        config_files=[Path("/root/.ai-marketplace-monitor/config.toml")],
+        log_handler=LogBroadcastHandler(capacity=50),
+    ),
+    logger=log,
+)
 time.sleep(2)
 
 os.makedirs("/tmp/qa", exist_ok=True)
@@ -28,32 +33,52 @@ results = []
 # Reproduces the field-drift failure that hid a notified vehicle: details
 # cached with price '**unspecified**' while the rating was written against
 # the tile price. The identity join must still attach the rating.
-from ai_marketplace_monitor.utils import cache as _cache, CacheType as _CT
+from ai_marketplace_monitor.utils import CacheType as _CT
+from ai_marketplace_monitor.utils import cache as _cache
 from ai_marketplace_monitor.webui.activity import build_activity as _ba
 
 _probe_url = "https://qa.invalid/item/qa-drift-probe"
-_cache.set((_CT.LISTING_DETAILS.value, _probe_url),
-           {"marketplace": "facebook", "name": "", "id": "qa-drift-probe",
-            "title": "QA drift probe 2012", "image": "", "price": "**unspecified**",
-            "post_url": _probe_url, "location": "Asheboro, NC", "seller": "qa",
-            "condition": "Used", "description": "drift"},
-           tag=_CT.LISTING_DETAILS.value)
-_cache.set((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"),
-           {"score": 4, "comment": "qa probe", "name": "qa"},
-           tag=_CT.AI_BY_LISTING.value)
+_cache.set(
+    (_CT.LISTING_DETAILS.value, _probe_url),
+    {
+        "marketplace": "facebook",
+        "name": "",
+        "id": "qa-drift-probe",
+        "title": "QA drift probe 2012",
+        "image": "",
+        "price": "**unspecified**",
+        "post_url": _probe_url,
+        "location": "Asheboro, NC",
+        "seller": "qa",
+        "condition": "Used",
+        "description": "drift",
+    },
+    tag=_CT.LISTING_DETAILS.value,
+)
+_cache.set(
+    (_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"),
+    {"score": 4, "comment": "qa probe", "name": "qa"},
+    tag=_CT.AI_BY_LISTING.value,
+)
 try:
     _out = _ba(_cache, [Path("/root/.ai-marketplace-monitor/config.toml")], limit=2000)
     _hit = [r for r in _out["listings"] if r["id"] == "qa-drift-probe"]
     ok = bool(_hit) and _hit[0]["item"] == "car" and _hit[0]["score"] == 4
-    print(("PASS " if ok else "FAIL ") + "drift-proof rating join",
-          "| row:", _hit[0]["item"] if _hit else "MISSING")
+    print(
+        ("PASS " if ok else "FAIL ") + "drift-proof rating join",
+        "| row:",
+        _hit[0]["item"] if _hit else "MISSING",
+    )
     results.append(("drift-proof rating join", ok, ""))
 finally:
     _cache.delete((_CT.LISTING_DETAILS.value, _probe_url))
     _cache.delete((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"))
+
+
 def check(name, ok, extra=""):
     results.append((name, bool(ok), extra))
     print(("PASS " if ok else "FAIL ") + name + (("  | " + str(extra)) if extra else ""))
+
 
 msgs = []
 with sync_playwright() as p:
@@ -78,7 +103,10 @@ with sync_playwright() as p:
     check("deals detail", pg.eval_on_selector("#deal-detail h2", "e=>!!e.textContent"))
     pg.click(".dli:nth-child(4)")
     pg.wait_for_timeout(400)
-    check("deals selection", pg.eval_on_selector(".dli:nth-child(4)", "e=>e.classList.contains('sel')"))
+    check(
+        "deals selection",
+        pg.eval_on_selector(".dli:nth-child(4)", "e=>e.classList.contains('sel')"),
+    )
     pg.click(".dd-myrank .star[data-rank='5']")
     pg.wait_for_timeout(900)
     check("star set", pg.eval_on_selector_all(".dd-myrank .star.on", "e=>e.length") == 5)
@@ -88,14 +116,18 @@ with sync_playwright() as p:
     check("dismiss hides", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 0)
     pg.click(".verdict-chips [data-verdict=hidden]")
     pg.wait_for_timeout(600)
-    check("hidden chip shows", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 1)
+    check(
+        "hidden chip shows", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 1
+    )
     pg.click(f".dli[data-key='{key}']")
     pg.wait_for_timeout(400)
     pg.click("[data-flag=hide]")
     pg.wait_for_timeout(900)
     pg.click(".verdict-chips [data-verdict='']")
     pg.wait_for_timeout(600)
-    check("restore returns", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 1)
+    check(
+        "restore returns", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 1
+    )
     pg.click(f".dli[data-key='{key}']")
     pg.wait_for_timeout(300)
     pg.click(".dd-myrank .star[data-rank='5']")  # clear rank
@@ -111,24 +143,42 @@ with sync_playwright() as p:
     # --- item pills: summary row filters on click ---
     n_pills = pg.eval_on_selector_all("#activity-summary .ipill", "e=>e.length")
     check("item pills render", n_pills >= 2, n_pills)
-    first_item = pg.eval_on_selector("#activity-summary .ipill[data-item-pill]:not([data-item-pill=''])", "e=>e.dataset.itemPill")
+    first_item = pg.eval_on_selector(
+        "#activity-summary .ipill[data-item-pill]:not([data-item-pill=''])",
+        "e=>e.dataset.itemPill",
+    )
     pg.click(f"#activity-summary .ipill[data-item-pill='{first_item}']")
     pg.wait_for_timeout(500)
     rows_match = pg.evaluate(
         "(item) => Array.from(document.querySelectorAll('.dli .m span:first-child')).every(x => x.textContent === item)",
-        first_item)
+        first_item,
+    )
     check("pill filters rows", rows_match, first_item)
-    check("pill active state", pg.eval_on_selector(f"#activity-summary .ipill[data-item-pill='{first_item}']", "e=>e.classList.contains('on')"))
+    check(
+        "pill active state",
+        pg.eval_on_selector(
+            f"#activity-summary .ipill[data-item-pill='{first_item}']",
+            "e=>e.classList.contains('on')",
+        ),
+    )
     pg.click(f"#activity-summary .ipill[data-item-pill='{first_item}']")
     pg.wait_for_timeout(500)
-    check("pill toggles back to All", pg.eval_on_selector("#activity-summary .ipill[data-item-pill='']", "e=>e.classList.contains('on')"))
+    check(
+        "pill toggles back to All",
+        pg.eval_on_selector(
+            "#activity-summary .ipill[data-item-pill='']", "e=>e.classList.contains('on')"
+        ),
+    )
 
     # --- paused items: out of the All view, reachable via their dimmed pill ---
-    paused = pg.eval_on_selector_all("#activity-summary .ipill.paused", "e=>e.map(x=>x.dataset.itemPill)")
+    paused = pg.eval_on_selector_all(
+        "#activity-summary .ipill.paused", "e=>e.map(x=>x.dataset.itemPill)"
+    )
     if paused:
         hidden_ok = pg.evaluate(
             "(names) => !Array.from(document.querySelectorAll('.dli .m span:first-child')).some(x => names.includes(x.textContent))",
-            paused)
+            paused,
+        )
         check("paused items absent from All", hidden_ok, paused)
         pg.click(f"#activity-summary .ipill[data-item-pill='{paused[0]}']")
         pg.wait_for_timeout(500)
@@ -147,26 +197,44 @@ with sync_playwright() as p:
     check("csv button", bool(pg.query_selector("#export-csv-btn")))
 
     # --- media: photo snapshot, pickup map, drive time on a facebook row ---
-    picked = pg.evaluate("""(() => {
+    picked = pg.evaluate(
+        """(() => {
       const rows = document.querySelectorAll('.dli');
       for (const r of rows) {
         const src = r.querySelector('.m span:nth-child(2)');
         if (src && src.textContent === 'facebook') return r.dataset.key;
       }
-      return null; })()""")
+      return null; })()"""
+    )
     if picked:
         pg.click(f".dli[data-key='{picked}']")
         pg.wait_for_timeout(2500)
         has_photo = bool(pg.query_selector(".dd-photo"))
-        check("photo element for fb row", True, "shown" if has_photo else "hidden (image expired — acceptable)")
-        map_ok = pg.evaluate("!!document.querySelector('#dd-map .leaflet-container, #dd-map.leaflet-container')")
+        check(
+            "photo element for fb row",
+            True,
+            "shown" if has_photo else "hidden (image expired — acceptable)",
+        )
+        map_ok = pg.evaluate(
+            "!!document.querySelector('#dd-map .leaflet-container, #dd-map.leaflet-container')"
+        )
         coords = pg.evaluate("(k)=>{return true}", picked)
-        check("pickup map mounts", map_ok or not pg.query_selector("#dd-map"),
-              "map" if map_ok else "no coords for this row")
+        check(
+            "pickup map mounts",
+            map_ok or not pg.query_selector("#dd-map"),
+            "map" if map_ok else "no coords for this row",
+        )
         pg.wait_for_timeout(4000)
-        route_txt = pg.eval_on_selector("#dd-route", "e=>e.textContent") if pg.query_selector("#dd-route") else ""
-        check("drive estimate", ("drive" in route_txt) or route_txt == "",
-              route_txt[:60] or "(routing unavailable — soft)")
+        route_txt = (
+            pg.eval_on_selector("#dd-route", "e=>e.textContent")
+            if pg.query_selector("#dd-route")
+            else ""
+        )
+        check(
+            "drive estimate",
+            ("drive" in route_txt) or route_txt == "",
+            route_txt[:60] or "(routing unavailable — soft)",
+        )
     else:
         check("media checks (no facebook rows)", True, "skipped")
     pg.screenshot(path="/tmp/qa/1-deals.png")
@@ -178,8 +246,11 @@ with sync_playwright() as p:
     n_cards = pg.eval_on_selector_all(".icard", "e=>e.length")
     check("item cards render", n_cards >= 4, n_cards)
     check("cards collapsed by default", pg.eval_on_selector_all(".icard.open", "e=>e.length") == 0)
-    check("sources strip", pg.eval_on_selector_all(".set", "e=>e.length") >= 3,
-          pg.eval_on_selector_all(".set .t", "e=>e.map(x=>x.textContent.trim())"))
+    check(
+        "sources strip",
+        pg.eval_on_selector_all(".set", "e=>e.length") >= 3,
+        pg.eval_on_selector_all(".set .t", "e=>e.map(x=>x.textContent.trim())"),
+    )
     check("add item btn", bool(pg.query_selector('[data-add="item"]')))
 
     S = ".icard[data-section='item.pc']"
@@ -192,11 +263,15 @@ with sync_playwright() as p:
     pg.fill(S + " [data-chip-add='search_phrases']", "qa test phrase")
     pg.press(S + " [data-chip-add='search_phrases']", "Enter")
     pg.wait_for_timeout(700)
-    in_toml = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa test phrase')")
+    in_toml = pg.evaluate(
+        "document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa test phrase')"
+    )
     check("chip add writes TOML", in_toml)
     pg.click(S + " [data-chip-del='search_phrases'][data-chip-val='qa test phrase']")
     pg.wait_for_timeout(700)
-    out_toml = pg.evaluate("!document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa test phrase')")
+    out_toml = pg.evaluate(
+        "!document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa test phrase')"
+    )
     check("chip remove cleans TOML", out_toml)
 
     # description edit + revert
@@ -204,7 +279,12 @@ with sync_playwright() as p:
     pg.fill(S + " [data-field=description]", "qa description probe")
     pg.eval_on_selector(S + " [data-field=description]", "e=>e.blur()")
     pg.wait_for_timeout(700)
-    check("description writes", pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa description probe')"))
+    check(
+        "description writes",
+        pg.evaluate(
+            "document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa description probe')"
+        ),
+    )
     pg.fill(S + " [data-field=description]", orig_desc)
     pg.eval_on_selector(S + " [data-field=description]", "e=>e.blur()")
     pg.wait_for_timeout(700)
@@ -214,7 +294,9 @@ with sync_playwright() as p:
     pg.fill(S + " [data-field=max_price]", "912")
     pg.eval_on_selector(S + " [data-field=max_price]", "e=>e.blur()")
     pg.wait_for_timeout(700)
-    seg = pg.evaluate("(() => { const v=document.querySelector('.CodeMirror').CodeMirror.getValue(); return v.split('[item.pc]')[1].split('\\n[')[0]; })()")
+    seg = pg.evaluate(
+        "(() => { const v=document.querySelector('.CodeMirror').CodeMirror.getValue(); return v.split('[item.pc]')[1].split('\\n[')[0]; })()"
+    )
     check("price writes unquoted int", "max_price = 912" in seg and 'max_price = "912"' not in seg)
     pg.fill(S + " [data-field=max_price]", orig_max)
     pg.eval_on_selector(S + " [data-field=max_price]", "e=>e.blur()")
@@ -223,28 +305,51 @@ with sync_playwright() as p:
     # threshold set + clear (verify against the BUFFER, the source of truth)
     pg.click(S + " .thr button[data-thr='2']")
     pg.wait_for_timeout(800)
-    seg_thr = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]")
+    seg_thr = pg.evaluate(
+        "document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]"
+    )
     check("threshold set writes", "rating = 2" in seg_thr)
-    check("threshold note shows", "≥ 2" in pg.eval_on_selector(S + " .thr .on", "e=>e.parentElement.nextElementSibling ? '' : ''") or "≥ 2" in pg.eval_on_selector(S + " .thr-note", "e=>e.textContent"))
+    check(
+        "threshold note shows",
+        "≥ 2"
+        in pg.eval_on_selector(S + " .thr .on", "e=>e.parentElement.nextElementSibling ? '' : ''")
+        or "≥ 2" in pg.eval_on_selector(S + " .thr-note", "e=>e.textContent"),
+    )
     pg.click(S + " .thr button[data-thr='2']")
     pg.wait_for_timeout(800)
-    seg_thr2 = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]")
+    seg_thr2 = pg.evaluate(
+        "document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]"
+    )
     check("threshold clear removes", "rating" not in seg_thr2)
-    check("cleared note inherits", "inherited" in pg.eval_on_selector(S + " .thr-note", "e=>e.textContent"))
+    check(
+        "cleared note inherits",
+        "inherited" in pg.eval_on_selector(S + " .thr-note", "e=>e.textContent"),
+    )
 
     # source toggle: with 2+ sources it toggles; with one, the guard refuses
     n_sources = pg.eval_on_selector_all(S + " .src", "e=>e.length")
     pg.click(S + " .src[data-src=facebook]")
     pg.wait_for_timeout(700)
     if n_sources >= 2:
-        check("source off", not pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"))
+        check(
+            "source off",
+            not pg.eval_on_selector(
+                S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"
+            ),
+        )
         pg.click(S + " .src[data-src=facebook]")
         pg.wait_for_timeout(700)
-        check("source back on", pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"))
+        check(
+            "source back on",
+            pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"),
+        )
     else:
         status = pg.eval_on_selector("#editor-status", "e=>e.textContent")
         check("single-source guard refuses", "at least one source" in status, status[:60])
-        check("source stays on", pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"))
+        check(
+            "source stays on",
+            pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"),
+        )
 
     # enable switch off/on
     pg.click(S + " .ihead .sw")
@@ -260,41 +365,75 @@ with sync_playwright() as p:
     final = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
     if final != snapshot:
         import difflib
-        diff = [l for l in difflib.unified_diff(snapshot.splitlines(), final.splitlines(), lineterm="") if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))]
-        only_norm = all("search_phrases" in l for l in diff)
+
+        diff = [
+            line
+            for line in difflib.unified_diff(
+                snapshot.splitlines(), final.splitlines(), lineterm=""
+            )
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+        ]
+        only_norm = all("search_phrases" in line for line in diff)
         check("buffer diff is only phrase normalization", only_norm, diff[:6])
     else:
         check("buffer pristine", True)
-    pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.setValue(" + repr(0) + " ? '' : arguments)") if False else None
-    pg.evaluate("(s) => { const cm=document.querySelector('.CodeMirror').CodeMirror; cm.setValue(s); }", snapshot)
+    (
+        pg.evaluate(
+            "document.querySelector('.CodeMirror').CodeMirror.setValue("
+            + repr(0)
+            + " ? '' : arguments)"
+        )
+        if False
+        else None
+    )
+    pg.evaluate(
+        "(s) => { const cm=document.querySelector('.CodeMirror').CodeMirror; cm.setValue(s); }",
+        snapshot,
+    )
     pg.wait_for_timeout(600)
     check("buffer reset (Save disabled)", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
 
     # modals open + cancel (no saves)
     pg.click(S + " [data-act=edit]")
     pg.wait_for_timeout(500)
-    check("More settings opens modal", not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"))
+    check(
+        "More settings opens modal",
+        not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
+    )
     pg.click("#form-cancel")
     pg.wait_for_timeout(300)
     pg.click(".set [data-edit-section='marketplace.facebook']")
     pg.wait_for_timeout(500)
-    check("strip Edit opens modal", not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"))
+    check(
+        "strip Edit opens modal",
+        not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
+    )
     pg.click("#form-cancel")
     pg.wait_for_timeout(300)
     pg.click('[data-add="item"]')
     pg.wait_for_timeout(500)
-    check("Add item opens modal", not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"))
+    check(
+        "Add item opens modal",
+        not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
+    )
     pg.click("#form-cancel")
     pg.wait_for_timeout(300)
 
     # --- available sources appear with Set up, prefilled to the right type ---
-    avail = pg.eval_on_selector_all(".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)")
+    avail = pg.eval_on_selector_all(
+        ".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)"
+    )
     check("available source cards", set(avail) >= {"ebay", "depop", "poshmark"}, avail)
     pg.click(".set.avail [data-setup-marketplace='ebay']")
     pg.wait_for_timeout(600)
-    check("setup modal prefilled", pg.eval_on_selector("#add-section-name", "e=>e.value") == "ebay")
+    check(
+        "setup modal prefilled", pg.eval_on_selector("#add-section-name", "e=>e.value") == "ebay"
+    )
     check("setup uses ebay schema", bool(pg.query_selector("#field-client_id")))
-    check("setup tab says eBay", "eBay" in pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent"))
+    check(
+        "setup tab says eBay",
+        "eBay" in pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent"),
+    )
     check("name input autofill-proof", pg.eval_on_selector("#add-section-name", "e=>e.readOnly"))
     check("field autofill-proof", pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
     pg.click("#field-client_id")
@@ -308,11 +447,16 @@ with sync_playwright() as p:
     buf = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
     seg_ok = "[marketplace.ebay]" in buf and 'market_type = "ebay"' in buf
     check("added section carries market_type", seg_ok)
-    check("ebay add starts disabled", "enabled = false" in buf.split("[marketplace.ebay]")[1][:400])
+    check(
+        "ebay add starts disabled", "enabled = false" in buf.split("[marketplace.ebay]")[1][:400]
+    )
     # The add must have PERSISTED (save-btn disabled = buffer==disk); a
     # validation rejection here is the bug this block exists to catch.
-    check("ebay add persisted to disk", pg.eval_on_selector("#save-btn", "e=>e.disabled"),
-          pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80])
+    check(
+        "ebay add persisted to disk",
+        pg.eval_on_selector("#save-btn", "e=>e.disabled"),
+        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
+    )
     # restore: put the snapshot back and save, leaving disk exactly as found
     pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
     pg.wait_for_timeout(700)
@@ -323,15 +467,19 @@ with sync_playwright() as p:
 
     # --- every configured section's form opens, renders, and is sane ---
     edit_targets = pg.eval_on_selector_all(
-        "[data-edit-section]", "e=>e.map(x=>x.dataset.editSection)")
+        "[data-edit-section]", "e=>e.map(x=>x.dataset.editSection)"
+    )
     for name in edit_targets:
         pg.click(f"[data-edit-section='{name}']")
         pg.wait_for_timeout(500)
         modal_open = not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')")
         nfields = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
         hint = pg.eval_on_selector("#form-modal-hint", "e=>e.hidden ? '' : e.textContent") or ""
-        check(f"form opens: {name}", modal_open and (nfields > 0 or "No form" in hint),
-              f"{nfields} fields")
+        check(
+            f"form opens: {name}",
+            modal_open and (nfields > 0 or "No form" in hint),
+            f"{nfields} fields",
+        )
         if name.startswith("marketplace.") and nfields:
             tab = pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent") or ""
             kind = name.split(".")[1]
@@ -344,7 +492,9 @@ with sync_playwright() as p:
     item_names = pg.eval_on_selector_all(".icard", "e=>e.map(x=>x.dataset.section)")
     for name in item_names[:2]:  # two representatives keep the run fast
         # Edit lives in the card body, hidden until the card is expanded.
-        if not pg.eval_on_selector(f".icard[data-section='{name}']", "e=>e.classList.contains('open')"):
+        if not pg.eval_on_selector(
+            f".icard[data-section='{name}']", "e=>e.classList.contains('open')"
+        ):
             pg.click(f".icard[data-section='{name}'] .ihead")
             pg.wait_for_timeout(350)
         pg.click(f".icard[data-section='{name}'] [data-act=edit]")
@@ -365,13 +515,17 @@ with sync_playwright() as p:
         pg.wait_for_timeout(500)
         tab = pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent") or "(no tabs)"
         check(f"setup tab: {kind}", label in tab, tab)
-        check(f"setup name prefilled: {kind}",
-              pg.eval_on_selector("#add-section-name", "e=>e.value") == kind)
+        check(
+            f"setup name prefilled: {kind}",
+            pg.eval_on_selector("#add-section-name", "e=>e.value") == kind,
+        )
         pg.click("#form-save")
         pg.wait_for_timeout(1200)
         buf2 = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
-        check(f"setup saved with market_type: {kind}",
-              f"[marketplace.{kind}]" in buf2 and f'market_type = "{kind}"' in buf2)
+        check(
+            f"setup saved with market_type: {kind}",
+            f"[marketplace.{kind}]" in buf2 and f'market_type = "{kind}"' in buf2,
+        )
     # restore disk to the snapshot after all setup writes
     pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
     pg.wait_for_timeout(700)
@@ -384,18 +538,30 @@ with sync_playwright() as p:
     # TOML tab roundtrip
     pg.click("#tab-toml")
     pg.wait_for_timeout(500)
-    check("TOML tab shows editor", pg.eval_on_selector("#config-toml-view", "e=>getComputedStyle(e).display") != "none")
+    check(
+        "TOML tab shows editor",
+        pg.eval_on_selector("#config-toml-view", "e=>getComputedStyle(e).display") != "none",
+    )
     pg.click("#tab-form")
     pg.wait_for_timeout(400)
-    check("back to Form", pg.eval_on_selector("#config-form-view", "e=>getComputedStyle(e).display") != "none")
+    check(
+        "back to Form",
+        pg.eval_on_selector("#config-form-view", "e=>getComputedStyle(e).display") != "none",
+    )
 
     # help levels
     pg.click("#help-seg button[data-help=guided]")
     pg.wait_for_timeout(300)
-    check("guided shows examples", pg.eval_on_selector(".fieldhelp .ex", "e=>getComputedStyle(e).display") == "block")
+    check(
+        "guided shows examples",
+        pg.eval_on_selector(".fieldhelp .ex", "e=>getComputedStyle(e).display") == "block",
+    )
     pg.click("#help-seg button[data-help=off]")
     pg.wait_for_timeout(300)
-    check("help off hides", pg.eval_on_selector(".fieldhelp", "e=>getComputedStyle(e).display") == "none")
+    check(
+        "help off hides",
+        pg.eval_on_selector(".fieldhelp", "e=>getComputedStyle(e).display") == "none",
+    )
     pg.click("#help-seg button[data-help=hints]")
     pg.wait_for_timeout(200)
 
@@ -403,7 +569,10 @@ with sync_playwright() as p:
     pg.click("#app-nav button[data-appview=logs]")
     pg.wait_for_timeout(600)
     check("logs render", pg.eval_on_selector_all("#logs > *", "e=>e.length") >= 0)
-    check("log buttons", bool(pg.query_selector("#log-download")) and bool(pg.query_selector("#log-clear")))
+    check(
+        "log buttons",
+        bool(pg.query_selector("#log-download")) and bool(pg.query_selector("#log-clear")),
+    )
     pg.click(".level-chips [data-level=ERROR]")
     pg.wait_for_timeout(300)
     pg.click(".level-chips [data-level=ALL]")
@@ -413,18 +582,28 @@ with sync_playwright() as p:
     # ---------- status ----------
     pg.click("#app-nav button[data-appview=status]")
     pg.wait_for_timeout(1500)
-    check("status tiles", pg.eval_on_selector_all(".stile", "e=>e.length") == 4,
-          pg.eval_on_selector_all(".stile .t", "e=>e.map(x=>x.textContent)"))
+    check(
+        "status tiles",
+        pg.eval_on_selector_all(".stile", "e=>e.length") == 4,
+        pg.eval_on_selector_all(".stile .t", "e=>e.map(x=>x.textContent)"),
+    )
     check("env lines", pg.eval_on_selector_all(".envline", "e=>e.length") > 0)
     pg.click("#status-refresh")
     pg.wait_for_timeout(800)
-    check("status refresh", "updated" in pg.eval_on_selector("#status-updated", "e=>e.textContent"))
+    check(
+        "status refresh", "updated" in pg.eval_on_selector("#status-updated", "e=>e.textContent")
+    )
     pg.screenshot(path="/tmp/qa/4-status.png")
 
     # ---------- header controls ----------
-    check("chip text", bool(pg.eval_on_selector("#monitor-status", "e=>e.textContent.trim()")),
-          pg.eval_on_selector("#monitor-status", "e=>e.textContent"))
-    check("browser link", "path=ws/vnc" in (pg.eval_on_selector("#browser-btn", "e=>e.href") or ""))
+    check(
+        "chip text",
+        bool(pg.eval_on_selector("#monitor-status", "e=>e.textContent.trim()")),
+        pg.eval_on_selector("#monitor-status", "e=>e.textContent"),
+    )
+    check(
+        "browser link", "path=ws/vnc" in (pg.eval_on_selector("#browser-btn", "e=>e.href") or "")
+    )
 
     # narrow viewport: deals split stacks
     pg.set_viewport_size({"width": 860, "height": 900})
@@ -444,12 +623,15 @@ with sync_playwright() as p:
 
     b.close()
 
-errors = [(t, m) for t, m in msgs if t in ("error", "PAGEERROR")
-          and "401" not in m
-          # expired listing images 404 by design; the img hides itself
-          and "listing-image" not in m
-          # OSM tile fetches can transiently fail without breaking the map
-          and "tile.openstreetmap.org" not in m]
+errors = [
+    (t, m)
+    for t, m in msgs
+    if t in ("error", "PAGEERROR") and "401" not in m
+    # expired listing images 404 by design; the img hides itself
+    and "listing-image" not in m
+    # OSM tile fetches can transiently fail without breaking the map
+    and "tile.openstreetmap.org" not in m
+]
 check("zero console errors", len(errors) == 0, errors[:3])
 
 fails = [r for r in results if not r[1]]

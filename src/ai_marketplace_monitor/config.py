@@ -22,9 +22,9 @@ from .ai import (
 from .depop import DepopMarketplace
 from .ebay import EbayMarketplace
 from .facebook import FacebookMarketplace
-from .poshmark import PoshmarkMarketplace
 from .marketplace import TItemConfig, TMarketplaceConfig
 from .notification import NotificationConfig
+from .poshmark import PoshmarkMarketplace
 from .region import RegionConfig
 from .user import User, UserConfig
 from .utils import MonitorConfig, Translator, hilight, merge_dicts
