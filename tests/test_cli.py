@@ -272,8 +272,12 @@ def test_config(config_file: Callable, config_content: str, acceptable: bool) ->
         "exclude_sellers": (list, type(None)),
         "keywords": (list, type(None)),
         "language": (str, type(None)),
+        "home_location": (str, type(None)),
         "login_wait_time": (int, type(None)),
-        "marketplace": (str, type(None)),
+        # An item may bind to several marketplaces; a bare string in the
+        # config normalizes to a single-element list, and None still means
+        # "search every marketplace".
+        "marketplace": (list, type(None)),
         "max_price": (str, type(None)),
         "max_search_interval": (int, type(None)),
         "market_type": (str, type(None)),
@@ -341,8 +345,15 @@ def test_support_multiple_marketplaces(config_file: Callable) -> None:
     assert len(config.item) == 2
     assert len(config.user) == 1
 
-    assert config.item["name"].marketplace == "facebook"
-    assert config.item["whatever"].marketplace == "houston"
+    # Unbound items search every marketplace rather than being pinned to
+    # whichever section happened to be iterated first -- the old pinning
+    # silently narrowed "search everywhere" to one source the moment a
+    # second marketplace existed.
+    assert config.item["name"].marketplace is None
+    assert config.item["name"].searches_on("facebook")
+    assert config.item["name"].searches_on("houston")
+    assert config.item["whatever"].marketplace == ["houston"]
+    assert not config.item["whatever"].searches_on("facebook")
     assert config.marketplace["facebook"].search_city == ["dallas"]
     assert config.marketplace["houston"].search_city == ["houston"]
 
