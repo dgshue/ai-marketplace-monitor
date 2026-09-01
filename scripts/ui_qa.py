@@ -599,7 +599,63 @@ with sync_playwright() as p:
     check("field autofill-proof", pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
     pg.click("#field-client_id")
     check("field opens on focus", not pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
-    # complete the add so market_type lands, then restore the disk config
+    # --- eBay mode select: the whole point is that no developer key is needed,
+    # so the choice has to be visible and the credentials must not be required.
+    has_mode = bool(pg.query_selector("#field-mode"))
+    check("ebay form offers a mode select", has_mode)
+    mode_opts = (
+        pg.eval_on_selector("#field-mode", "e=>Array.from(e.options).map(o=>o.value)")
+        if has_mode
+        else []
+    )
+    check("ebay mode offers api and browser", set(mode_opts) >= {"", "api", "browser"}, mode_opts)
+    check(
+        "ebay mode explains the tradeoff",
+        "no keys" in (pg.eval_on_selector("#field-mode ~ .form-help", "e=>e.textContent") or ""),
+    )
+    check(
+        "ebay keys are optional",
+        not pg.eval_on_selector(
+            "[data-key='client_id']",
+            "e=>!!e.closest('.form-field').querySelector('.required')",
+        ),
+    )
+
+    # --- adding eBay with ZERO credentials must work and land enabled ---
+    pg.click("#form-save")
+    pg.wait_for_timeout(1800)
+    buf0 = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
+    check("keyless ebay add lands a section", "[marketplace.ebay]" in buf0)
+    seg0 = buf0.split("[marketplace.ebay]")[1][:400] if "[marketplace.ebay]" in buf0 else ""
+    check("keyless ebay add carries market_type", 'market_type = "ebay"' in seg0, seg0[:120])
+    check("keyless ebay add starts enabled", "enabled = true" in seg0, seg0[:120])
+    check("keyless ebay add writes no client_id", "client_id" not in seg0, seg0[:120])
+    check(
+        "keyless ebay add persisted to disk",
+        pg.eval_on_selector("#save-btn", "e=>e.disabled"),
+        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
+    )
+    ebay_card = (
+        pg.eval_on_selector(
+            ".set:has([data-edit-section='marketplace.ebay']) .d", "e=>e.textContent"
+        )
+        or ""
+    )
+    check("ebay card reports browser mode", "browser" in ebay_card.lower(), ebay_card[:80])
+    check(
+        "ebay card claims no key needed", "no developer key" in ebay_card.lower(), ebay_card[:80]
+    )
+    # restore before the keyed variant, so the section name is free again
+    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
+    pg.wait_for_timeout(700)
+    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
+        pg.click("#save-btn")
+        pg.wait_for_timeout(1500)
+
+    # --- the same add WITH credentials still works, and stays enabled too ---
+    pg.click(".set.avail [data-setup-marketplace='ebay']")
+    pg.wait_for_timeout(600)
+    pg.click("#field-client_id")
     pg.fill("#field-client_id", "${EBAY_CLIENT_ID}")
     pg.click("#field-client_secret")
     pg.fill("#field-client_secret", "${EBAY_CLIENT_SECRET}")
@@ -609,8 +665,16 @@ with sync_playwright() as p:
     seg_ok = "[marketplace.ebay]" in buf and 'market_type = "ebay"' in buf
     check("added section carries market_type", seg_ok)
     check(
-        "ebay add starts disabled", "enabled = false" in buf.split("[marketplace.ebay]")[1][:400]
+        "keyed ebay add starts enabled",
+        "enabled = true" in buf.split("[marketplace.ebay]")[1][:400],
     )
+    ebay_card2 = (
+        pg.eval_on_selector(
+            ".set:has([data-edit-section='marketplace.ebay']) .d", "e=>e.textContent"
+        )
+        or ""
+    )
+    check("keyed ebay card reports API mode", "api" in ebay_card2.lower(), ebay_card2[:80])
     # The add must have PERSISTED (save-btn disabled = buffer==disk); a
     # validation rejection here is the bug this block exists to catch.
     check(

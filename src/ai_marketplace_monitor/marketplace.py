@@ -758,7 +758,10 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
     # backends like Facebook, whose search URL is built around a city; false
     # for API backends that search a whole catalogue.
     requires_search_city = True
-    # Whether this backend drives a Playwright browser at all.
+    # Whether this backend can drive a Playwright browser at all. This is the
+    # class-level *maximum*: a backend whose configuration decides (eBay, whose
+    # `mode` picks between the REST API and a scrape) leaves this True and
+    # narrows it per instance in needs_browser().
     requires_browser = True
 
     def __init__(
@@ -782,6 +785,15 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
     @classmethod
     def get_item_config(cls: Type["Marketplace"], **kwargs: Any) -> TItemConfig:
         raise NotImplementedError("get_config method must be implemented by subclasses.")
+
+    def needs_browser(self: "Marketplace") -> bool:
+        """Whether THIS configured instance needs a browser.
+
+        Callers deciding whether to launch Playwright must ask the instance,
+        not the class: eBay answers True or False depending on its `mode`, and
+        the class attribute can only state the worst case.
+        """
+        return self.requires_browser
 
     def configure(
         self: "Marketplace", config: TMarketplaceConfig, translator: Translator | None = None

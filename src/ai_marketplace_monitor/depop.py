@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict
 from urllib.parse import quote
 
-from .browser_market import BrowserTileMarketplace
+from .browser_market import BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
 
 
@@ -45,7 +45,7 @@ class DepopMarketplace(BrowserTileMarketplace):
     })()
     """
 
-    def search_url(self: "DepopMarketplace", phrase: str) -> str:
+    def search_url(self: "DepopMarketplace", phrase: str, item_config: BrowserItemConfig) -> str:
         return f"https://www.depop.com/search/?q={quote(phrase)}"
 
     def tile_to_listing(self: "DepopMarketplace", tile: Dict[str, Any]) -> Listing | None:

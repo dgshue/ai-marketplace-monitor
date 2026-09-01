@@ -1045,13 +1045,21 @@
 
     // ---- Item form ----
     // Matched by prefix "item" — see the lookup logic below.
-    // eBay goes through the official Browse API, so this section is credentials
-    // and search scope -- there is no browser, login, or 2FA to configure.
+    // eBay has two backends and `mode` picks between them, so the credentials
+    // below are optional: browser mode needs none. There is still no login or
+    // 2FA to configure in either mode.
     "marketplace.ebay": [
-      { key: "client_id", label: "eBay App ID (Client ID)", type: "text", required: true, column: "left",
-        help: "From an application key set at developer.ebay.com. Use ${EBAY_CLIENT_ID} to read it from the environment." },
-      { key: "client_secret", label: "eBay Cert ID (Client Secret)", type: "password", required: true, column: "left",
-        help: "Use ${EBAY_CLIENT_SECRET} to keep it out of the config file." },
+      { key: "mode", label: "How to search eBay", type: "select", column: "left",
+        options: [
+          { value: "", label: "Automatic — browser unless API keys are set" },
+          { value: "browser", label: "Browser — scrape ebay.com, no keys needed" },
+          { value: "api", label: "API — official Browse API, needs a developer key" },
+        ],
+        help: "Browser mode drives the same Chromium the Depop and Poshmark sources use: no eBay account, no keys, ~240 newest listings per phrase. Tiles carry no seller and no description, so the AI judges on title, price and condition. API mode is faster and richer (seller, description, exact location) but needs a free application key set from developer.ebay.com and is capped at about 5000 calls a day. Automatic picks API when both keys below are filled in, browser otherwise." },
+      { key: "client_id", label: "eBay App ID (Client ID)", type: "text", column: "left",
+        help: "Only used in API mode. From an application key set at developer.ebay.com. Use ${EBAY_CLIENT_ID} to read it from the environment. Leave blank to search with the browser instead." },
+      { key: "client_secret", label: "eBay Cert ID (Client Secret)", type: "password", column: "left",
+        help: "Only used in API mode. Use ${EBAY_CLIENT_SECRET} to keep it out of the config file." },
       { key: "marketplace_id", label: "eBay site", type: "select", column: "left",
         options: [
           { value: "", label: "EBAY_US (default)" },
@@ -1059,16 +1067,17 @@
           { value: "EBAY_CA", label: "EBAY_CA — Canada" },
           { value: "EBAY_DE", label: "EBAY_DE — Germany" },
           { value: "EBAY_AU", label: "EBAY_AU — Australia" },
-        ] },
+        ],
+        help: "Also picks the domain browser mode searches (ebay.co.uk, ebay.de, ...)." },
       { key: "delivery_country", label: "Ships to", type: "text", column: "left",
-        help: "Two-letter country code, e.g. US. Excludes items that will not ship to you." },
+        help: "API mode only. Two-letter country code, e.g. US. Excludes items that will not ship to you." },
       { key: "buying_options", label: "Buying options", type: "checkboxes", column: "left",
         options: [
           { value: "FIXED_PRICE", label: "Buy It Now" },
           { value: "AUCTION", label: "Auction" },
           { value: "BEST_OFFER", label: "Best Offer" },
         ],
-        help: "Leave empty for all." },
+        help: "API mode only. Leave empty for all." },
 
       { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right",
         options: [
@@ -1083,7 +1092,7 @@
       { key: "notify", label: "Notify users", type: "text", column: "right",
         help: "Comma-separated [user.*] names." },
       { key: "search_interval", label: "Search interval", type: "text", column: "right",
-        help: "e.g. '30m'. The Browse API allows ~5000 calls/day across the whole app." },
+        help: "e.g. '30m'. The Browse API allows ~5000 calls/day across the whole app; browser mode is scraped in the shared browser, so be polite." },
       { key: "max_search_interval", label: "Max search interval", type: "text", column: "right", advanced: true },
       { key: "min_price", label: "Min price", type: "text", group: "Pricing", column: "right", advanced: true },
       { key: "max_price", label: "Max price", type: "text", column: "right", advanced: true },
@@ -1349,7 +1358,7 @@
       const schemaKind = (Object.entries(FORM_SCHEMAS).find(([, v]) => v === schema) || [""])[0];
       const MARKET_TABS = {
         "marketplace.facebook": ["Facebook Login", "Search Defaults (overridable per item)"],
-        "marketplace.ebay": ["eBay API", "Search Defaults"],
+        "marketplace.ebay": ["eBay", "Search Defaults"],
         "marketplace.depop": ["Depop", "Pricing"],
         "marketplace.poshmark": ["Poshmark", "Pricing"],
       };
@@ -1648,9 +1657,14 @@
         values.market_type = formContext.addKind;
       }
       if (formContext.addKind === "ebay" && !("enabled" in values)) {
-        // A fresh eBay section starts disabled: with placeholder credentials
-        // it cannot search yet, and starting paused says so honestly.
-        values.enabled = false;
+        // Browser mode needs no credentials, so a fresh eBay section is live
+        // the moment it is added — no "set up keys first" gate. The one case
+        // that still starts paused is an explicit API mode with no key, which
+        // genuinely cannot search until one arrives.
+        const apiWithoutKeys =
+          String(values.mode || "").toLowerCase() === "api" &&
+          !(values.client_id && values.client_secret);
+        values.enabled = !apiWithoutKeys;
       }
       const block = generateSectionToml(fullName, values);
       let buffer = state.currentContent;
@@ -2183,7 +2197,7 @@
     const sum = (activity.summary || []).find((x) => x.item === (section.suffix || section.name));
 
     const bound = fields.marketplace ? [].concat(fields.marketplace) : null;
-    const SRC_SUB = { facebook: "browser · local pickup", ebay: "Browse API · ships", depop: "scrape · ships", poshmark: "scrape · ships" };
+    const SRC_SUB = { facebook: "browser · local pickup", ebay: "nationwide · ships", depop: "scrape · ships", poshmark: "scrape · ships" };
     const sources = marketplaceNames()
       .map((mk) => {
         const on = bound === null || bound.includes(mk);
@@ -2350,6 +2364,7 @@
       const kind = String(f.market_type || mk.suffix || "facebook").toLowerCase();
       let dot = "ok";
       let detail = "";
+      let ebayMode = "";
       if (kind === "facebook") {
         const homeTxt = f.home_location
           ? " · home " + f.home_location
@@ -2358,10 +2373,27 @@
         else if (fb.exists) { dot = "warn"; detail = "anonymous session — log in via the Browser view"; }
         else { dot = "warn"; detail = "not signed in yet"; }
       } else if (kind === "ebay") {
-        detail = "Browse API";
+        // Mirrors EbayMarketplaceConfig.resolved_mode: an explicit mode wins,
+        // otherwise credentials decide. The card has to say which backend is
+        // actually running -- "needs a developer key" was wrong the moment
+        // browser mode existed, and is the state most users will be in.
+        ebayMode =
+          String(f.mode || "").toLowerCase() ||
+          (f.client_id && f.client_secret ? "api" : "browser");
+        if (ebayMode === "api") {
+          detail = "official Browse API";
+          if (!(f.client_id && f.client_secret)) {
+            dot = "warn";
+            detail = "API mode, but no key set — add one or switch to browser mode";
+          }
+        } else {
+          detail = "browser scrape · no developer key needed";
+        }
       }
       if (f.enabled === false) { dot = "dim"; detail = "disabled"; }
-      const refs = envRefsIn(f);
+      // In browser mode the eBay credentials are dead weight; a leftover
+      // ${EBAY_CLIENT_ID} that nobody set is not a problem worth a red dot.
+      const refs = ebayMode === "browser" ? [] : envRefsIn(f);
       if (refs.some((r) => env[r] === false)) dot = "err";
       cards.push(`
         <div class="set">
@@ -2408,7 +2440,7 @@
         })
     );
     const KIND_DESC = {
-      ebay: "official Browse API · free key from developer.ebay.com",
+      ebay: "browser scrape or official API · no developer key needed",
       depop: "browser scrape · ships nationwide",
       poshmark: "browser scrape · ships nationwide",
       facebook: "browser · local pickup",
