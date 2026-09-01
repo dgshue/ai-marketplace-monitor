@@ -186,6 +186,26 @@ def _supported_marketplace_names() -> List[str]:
     return sorted(supported_marketplaces)
 
 
+class _UIStaticFiles(StaticFiles):
+    """StaticFiles that forbids silent reuse of the app's own assets.
+
+    Plain StaticFiles sends Last-Modified and ETag but no Cache-Control, so
+    browsers apply heuristic freshness and keep serving a cached app.js for
+    hours or days after an upgrade -- the shell reloads (it is already
+    no-cache) but the code behind it does not, and every new control is
+    simply absent. no-cache still permits a 304 against the ETag, so an
+    unchanged file costs one conditional request, never a re-download.
+    Vendored libraries under /static/vendor never change between releases
+    and keep the default behaviour.
+    """
+
+    async def get_response(self: "_UIStaticFiles", path: str, scope: Any) -> Any:
+        response = await super().get_response(path, scope)
+        if not path.startswith("vendor/"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 def create_app(
     config: WebUIConfig,
     state: AuthState,
@@ -552,7 +572,7 @@ def create_app(
     # Static UI
     # ------------------------------------------------------------------
     if STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+        app.mount("/static", _UIStaticFiles(directory=str(STATIC_DIR)), name="static")
 
         @app.get("/")
         async def index() -> FileResponse:

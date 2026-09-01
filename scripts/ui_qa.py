@@ -102,6 +102,20 @@ with sync_playwright() as p:
     pg.on("console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", ""))))
     pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
 
+    # ---------- asset cache policy: an upgrade must never leave a stale app.js ----------
+    import urllib.request as _u
+
+    def _cc(path):
+        with _u.urlopen("http://127.0.0.1:8476" + path, timeout=10) as r:
+            return r.headers.get("Cache-Control", "")
+
+    check("app.js is no-cache", "no-cache" in _cc("/static/app.js"), _cc("/static/app.js"))
+    check("app.css is no-cache", "no-cache" in _cc("/static/app.css"))
+    check("index is no-cache", "no-cache" in _cc("/"))
+    check(
+        "vendor assets stay cacheable", "no-cache" not in _cc("/static/vendor/leaflet/leaflet.js")
+    )
+
     # ---------- login ----------
     pg.goto("http://127.0.0.1:8476/", wait_until="load")
     pg.wait_for_timeout(900)
