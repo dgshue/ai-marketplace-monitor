@@ -1,5 +1,7 @@
 """eBay's two backends and the rule that picks between them."""
 
+from typing import Any
+
 import pytest
 
 from ai_marketplace_monitor.ebay import (
@@ -10,7 +12,7 @@ from ai_marketplace_monitor.ebay import (
 )
 
 
-def config(**kwargs: object) -> EbayMarketplaceConfig:
+def config(**kwargs: Any) -> EbayMarketplaceConfig:
     return EbayMarketplaceConfig(name="ebay", **kwargs)
 
 
@@ -53,7 +55,7 @@ def test_blank_mode_means_automatic() -> None:
 
 
 @pytest.mark.parametrize("bad", ["scrape", "rest", "Api2", 7])
-def test_invalid_mode_rejected(bad: object) -> None:
+def test_invalid_mode_rejected(bad: Any) -> None:
     with pytest.raises(ValueError):
         config(mode=bad)
 
@@ -72,7 +74,7 @@ def test_needs_browser_is_per_instance() -> None:
 # ------------------------------------------------------------- browser
 
 
-def scraper(**kwargs: object) -> EbayBrowserMarketplace:
+def scraper(**kwargs: Any) -> EbayBrowserMarketplace:
     market = EbayBrowserMarketplace("ebay", None, None, None)
     market.configure(config(**kwargs))
     return market
