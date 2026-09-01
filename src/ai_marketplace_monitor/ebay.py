@@ -99,16 +99,21 @@ class EbayMarketplaceConfig(MarketplaceConfig):
     def handle_client_id(self: "EbayMarketplaceConfig") -> None:
         if self.client_id is None:
             return
-        if not isinstance(self.client_id, str) or not self.client_id.strip():
+        if not isinstance(self.client_id, str):
             raise ValueError(f"Marketplace {hilight(self.name)} client_id must be a string.")
-        self.client_id = self.client_id.strip()
+        # An empty value is how "not configured yet" arrives in practice: the
+        # compose file passes EBAY_CLIENT_ID through unconditionally, so an
+        # unset stack variable reaches ${EBAY_CLIENT_ID} as "". Rejecting that
+        # at parse time made the whole config invalid before the user ever had
+        # credentials; treat it as absent and complain at search time instead.
+        self.client_id = self.client_id.strip() or None
 
     def handle_client_secret(self: "EbayMarketplaceConfig") -> None:
         if self.client_secret is None:
             return
-        if not isinstance(self.client_secret, str) or not self.client_secret.strip():
+        if not isinstance(self.client_secret, str):
             raise ValueError(f"Marketplace {hilight(self.name)} client_secret must be a string.")
-        self.client_secret = self.client_secret.strip()
+        self.client_secret = self.client_secret.strip() or None
 
     def handle_marketplace_id(self: "EbayMarketplaceConfig") -> None:
         if self.marketplace_id is None:
@@ -296,7 +301,14 @@ class EbayMarketplace(Marketplace):
         self: "EbayMarketplace", item_config: EbayItemConfig
     ) -> Generator[Listing, None, None]:
         config: EbayMarketplaceConfig = self.config  # type: ignore[assignment]
-        token = self._access_token()
+        try:
+            token = self._access_token()
+        except ValueError as e:
+            # Missing/invalid credentials must not take the monitor loop down;
+            # an enabled-but-unconfigured eBay section logs and skips the pass.
+            if self.logger:
+                self.logger.error(f"""{hilight("[Search]", "fail")} {e}""")
+            return
         headers = {
             "Authorization": f"Bearer {token}",
             "X-EBAY-C-MARKETPLACE-ID": config.marketplace_id or "EBAY_US",

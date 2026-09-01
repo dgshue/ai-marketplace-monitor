@@ -1306,7 +1306,8 @@
       nameWrapper.innerHTML =
         `<label class="form-label">Section name <span class="required">*</span></label>` +
         `<input type="text" id="add-section-name" name="aimm_section_name" ` +
-        `autocomplete="off" value="${esc(currentSuffix)}" ` +
+        `autocomplete="one-time-code" readonly onfocus="this.removeAttribute('readonly')" ` +
+        `value="${esc(currentSuffix)}" ` +
         `placeholder="e.g. gopro, me" />` +
         `<p class="form-help">[${esc(currentPrefix)}.<em>name</em>]</p>`;
       const nameInput = nameWrapper.querySelector("input");
@@ -1319,14 +1320,26 @@
 
     // If the schema uses columns, render tabs.
     if (hasColumns) {
-      // Choose tab labels based on what kind of section we're editing.
+      // Labels follow which schema is actually rendering — an eBay form
+      // titled "Facebook Login" is how this read before there was a second
+      // marketplace.
       const prefix = formContext.sectionName.split(".")[0];
+      const schemaKind = (Object.entries(FORM_SCHEMAS).find(([, v]) => v === schema) || [""])[0];
+      const MARKET_TABS = {
+        "marketplace.facebook": ["Facebook Login", "Search Defaults (overridable per item)"],
+        "marketplace.ebay": ["eBay API", "Search Defaults"],
+        "marketplace.depop": ["Depop", "Pricing"],
+        "marketplace.poshmark": ["Poshmark", "Pricing"],
+      };
+      const marketTabs = MARKET_TABS[schemaKind];
       const leftLabel =
-        prefix === "marketplace" ? "Facebook Login" : "Item Settings";
+        prefix === "marketplace"
+          ? (marketTabs ? marketTabs[0] : "Login")
+          : "Item Settings";
       const rightLabel =
         prefix === "marketplace"
-          ? "Search Defaults (overridable per item)"
-          : "Override Marketplace Defaults";
+          ? (marketTabs ? marketTabs[1] : "Search Defaults")
+          : "Filters & AI";
 
       const tabBar = document.createElement("div");
       tabBar.className = "form-tab-bar";
@@ -1452,6 +1465,14 @@
         // one value password managers reliably leave alone.
         input.name = "aimm_" + fieldDef.key;
         input.autocomplete = fieldDef.type === "password" ? "new-password" : "off";
+        // Chrome fills credential-looking fields at render time regardless of
+        // autocomplete when a password input is nearby. It skips readonly
+        // fields, so inputs open on focus instead — a saved "admin" login
+        // renamed a config section through this exact gap, twice.
+        if (fieldDef.type === "text" || fieldDef.type === "password") {
+          input.readOnly = true;
+          input.addEventListener("focus", () => { input.readOnly = false; });
+        }
         input.dataset.key = fieldDef.key;
         label.htmlFor = fieldDef.key;
         input.id = "field-" + fieldDef.key;
@@ -1601,6 +1622,14 @@
         return;
       }
 
+      if (formContext.addKind && !("market_type" in values)) {
+        values.market_type = formContext.addKind;
+      }
+      if (formContext.addKind === "ebay" && !("enabled" in values)) {
+        // A fresh eBay section starts disabled: with placeholder credentials
+        // it cannot search yet, and starting paused says so honestly.
+        values.enabled = false;
+      }
       const block = generateSectionToml(fullName, values);
       let buffer = state.currentContent;
       // Append after the last section of the same type, or at end.
@@ -1776,6 +1805,11 @@
       schema,
       addMode: true,
       addPrefix: prefix,
+      // The concrete marketplace type this add is for, when known. Written
+      // into the section as market_type so the section NAME never has to
+      // carry the type — renaming (or an autofill accident) cannot silently
+      // turn an eBay section into a facebook one.
+      addKind: prefix === "marketplace" ? suggestedName || "facebook" : null,
       nameValue: suggestedName,
     };
     activeTab = "left";

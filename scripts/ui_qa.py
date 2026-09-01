@@ -242,8 +242,92 @@ with sync_playwright() as p:
     pg.wait_for_timeout(600)
     check("setup modal prefilled", pg.eval_on_selector("#add-section-name", "e=>e.value") == "ebay")
     check("setup uses ebay schema", bool(pg.query_selector("#field-client_id")))
-    pg.click("#form-cancel")
-    pg.wait_for_timeout(300)
+    check("setup tab says eBay", "eBay" in pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent"))
+    check("name input autofill-proof", pg.eval_on_selector("#add-section-name", "e=>e.readOnly"))
+    check("field autofill-proof", pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
+    pg.click("#field-client_id")
+    check("field opens on focus", not pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
+    # complete the add so market_type lands, then restore the disk config
+    pg.fill("#field-client_id", "${EBAY_CLIENT_ID}")
+    pg.click("#field-client_secret")
+    pg.fill("#field-client_secret", "${EBAY_CLIENT_SECRET}")
+    pg.click("#form-save")
+    pg.wait_for_timeout(1800)
+    buf = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
+    seg_ok = "[marketplace.ebay]" in buf and 'market_type = "ebay"' in buf
+    check("added section carries market_type", seg_ok)
+    check("ebay add starts disabled", "enabled = false" in buf.split("[marketplace.ebay]")[1][:400])
+    # The add must have PERSISTED (save-btn disabled = buffer==disk); a
+    # validation rejection here is the bug this block exists to catch.
+    check("ebay add persisted to disk", pg.eval_on_selector("#save-btn", "e=>e.disabled"),
+          pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80])
+    # restore: put the snapshot back and save, leaving disk exactly as found
+    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
+    pg.wait_for_timeout(700)
+    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
+        pg.click("#save-btn")
+        pg.wait_for_timeout(1500)
+    check("disk restored after setup test", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+
+    # --- every configured section's form opens, renders, and is sane ---
+    edit_targets = pg.eval_on_selector_all(
+        "[data-edit-section]", "e=>e.map(x=>x.dataset.editSection)")
+    for name in edit_targets:
+        pg.click(f"[data-edit-section='{name}']")
+        pg.wait_for_timeout(500)
+        modal_open = not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')")
+        nfields = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+        hint = pg.eval_on_selector("#form-modal-hint", "e=>e.hidden ? '' : e.textContent") or ""
+        check(f"form opens: {name}", modal_open and (nfields > 0 or "No form" in hint),
+              f"{nfields} fields")
+        if name.startswith("marketplace.") and nfields:
+            tab = pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent") or ""
+            kind = name.split(".")[1]
+            if kind != "facebook":
+                check(f"tab label not facebook: {name}", "Facebook" not in tab, tab)
+        pg.click("#form-cancel")
+        pg.wait_for_timeout(250)
+
+    # item modals: both tabs render fields for every item card
+    item_names = pg.eval_on_selector_all(".icard", "e=>e.map(x=>x.dataset.section)")
+    for name in item_names[:2]:  # two representatives keep the run fast
+        # Edit lives in the card body, hidden until the card is expanded.
+        if not pg.eval_on_selector(f".icard[data-section='{name}']", "e=>e.classList.contains('open')"):
+            pg.click(f".icard[data-section='{name}'] .ihead")
+            pg.wait_for_timeout(350)
+        pg.click(f".icard[data-section='{name}'] [data-act=edit]")
+        pg.wait_for_timeout(450)
+        left = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+        pg.click(".form-tab-bar .form-tab:nth-child(2)")
+        pg.wait_for_timeout(350)
+        right = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+        check(f"item modal tabs: {name}", left > 0 and right > 0, f"L{left}/R{right}")
+        pg.click("#form-cancel")
+        pg.wait_for_timeout(250)
+        pg.click(f".icard[data-section='{name}'] .ihead")  # collapse back
+        pg.wait_for_timeout(250)
+
+    # depop + poshmark setup flows: labeled correctly, save carries market_type
+    for kind, label in (("depop", "Depop"), ("poshmark", "Poshmark")):
+        pg.click(f".set.avail [data-setup-marketplace='{kind}']")
+        pg.wait_for_timeout(500)
+        tab = pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent") or "(no tabs)"
+        check(f"setup tab: {kind}", label in tab, tab)
+        check(f"setup name prefilled: {kind}",
+              pg.eval_on_selector("#add-section-name", "e=>e.value") == kind)
+        pg.click("#form-save")
+        pg.wait_for_timeout(1200)
+        buf2 = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
+        check(f"setup saved with market_type: {kind}",
+              f"[marketplace.{kind}]" in buf2 and f'market_type = "{kind}"' in buf2)
+    # restore disk to the snapshot after all setup writes
+    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
+    pg.wait_for_timeout(700)
+    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
+        pg.click("#save-btn")
+        pg.wait_for_timeout(1500)
+    check("disk restored after setup sweep", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+    pg.screenshot(path="/tmp/qa/6-forms.png")
 
     # TOML tab roundtrip
     pg.click("#tab-toml")
