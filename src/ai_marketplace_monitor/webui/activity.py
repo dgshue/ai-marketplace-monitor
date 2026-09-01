@@ -191,6 +191,25 @@ def _collect_notified(local_cache: Cache) -> Dict[Tuple[str, str], str]:
     return notified
 
 
+def _collect_by_listing(local_cache: Cache) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+    """(marketplace, listing_id, item) -> AIResponse dict, the drift-proof join."""
+    out: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for key in local_cache.iterkeys():
+        if not isinstance(key, tuple) or len(key) < 4:
+            continue
+        if key[0] != CacheType.AI_BY_LISTING.value:
+            continue
+        try:
+            value = local_cache.get(key)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            continue
+        if isinstance(value, dict) and "score" in value:
+            out[(key[1], key[2], key[3])] = value
+    return out
+
+
 def _collect_flags(local_cache: Cache) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """(marketplace, listing_id) -> user flags: my_rank and hidden."""
     flags: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -236,6 +255,7 @@ def build_activity(
     per_item_threshold, default_threshold, disabled_items = thresholds_from_config(config_files)
     home = home_from_config(config_files)
     ratings = _collect_ratings(local_cache)
+    by_listing = _collect_by_listing(local_cache)
     notified = _collect_notified(local_cache)
     user_flags = _collect_flags(local_cache)
 
@@ -268,13 +288,24 @@ def build_activity(
         # that the cached row lost.
         details = asdict(listing)
         for item, threshold in candidates:
-            probe = listing if details.get("name") == item else Listing(**{**details, "name": item})
-            listing_hash = probe.hash
-            if listing_hash in seen_hashes:
+            ident = (listing.marketplace, listing.id, item)
+            if ident in seen_hashes:
                 continue
-            rating = ratings.get(listing_hash)
+            # Identity join first (cannot drift); hash reconstruction only for
+            # ratings written before the by-listing mirror existed.
+            rating = by_listing.get(ident)
+            listing_hash = ident
             if rating is None:
-                continue
+                probe = (
+                    listing if details.get("name") == item else Listing(**{**details, "name": item})
+                )
+                legacy_hash = probe.hash
+                if legacy_hash in seen_hashes:
+                    continue
+                rating = ratings.get(legacy_hash)
+                listing_hash = legacy_hash
+                if rating is None:
+                    continue
             score = rating.get("score")
             if not isinstance(score, int):
                 continue

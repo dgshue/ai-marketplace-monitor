@@ -67,11 +67,18 @@ class AIResponse:
         marketplace_config: TMarketplaceConfig,
         local_cache: Cache | None = None,
     ) -> Optional["AIResponse"]:
-        res = (cache if local_cache is None else local_cache).get(
+        store = cache if local_cache is None else local_cache
+        res = store.get(
             (CacheType.AI_INQUIRY.value, item_config.hash, marketplace_config.hash, listing.hash)
         )
         if res is None:
             return None
+        # Write-on-read migration: mirror ratings that predate the by-listing
+        # key, so the activity view heals old entries the next time a search
+        # touches them.
+        by_key = (CacheType.AI_BY_LISTING.value, listing.marketplace, listing.id, item_config.name)
+        if store.get(by_key) is None:
+            store.set(by_key, res, tag=CacheType.AI_BY_LISTING.value)
         return AIResponse(**res)
 
     def to_cache(
@@ -81,7 +88,15 @@ class AIResponse:
         marketplace_config: TMarketplaceConfig,
         local_cache: Cache | None = None,
     ) -> None:
-        (cache if local_cache is None else local_cache).set(
+        store = cache if local_cache is None else local_cache
+        # Drift-proof mirror keyed by identity rather than content hash; the
+        # activity view joins on this. See CacheType.AI_BY_LISTING.
+        store.set(
+            (CacheType.AI_BY_LISTING.value, listing.marketplace, listing.id, item_config.name),
+            asdict(self),
+            tag=CacheType.AI_BY_LISTING.value,
+        )
+        store.set(
             (CacheType.AI_INQUIRY.value, item_config.hash, marketplace_config.hash, listing.hash),
             asdict(self),
             tag=CacheType.AI_INQUIRY.value,

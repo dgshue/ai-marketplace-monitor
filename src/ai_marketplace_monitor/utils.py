@@ -92,6 +92,12 @@ class CacheType(Enum):
     # Per-listing state the user sets in the web UI: their own 1-5 rank and a
     # hidden flag ("off my radar, still tracked"). Key: (tag, marketplace, id).
     USER_FLAGS = "user-flags"
+    # Direct (marketplace, listing_id, item) -> AIResponse mirror of AI_INQUIRY.
+    # AI_INQUIRY is keyed by Listing.hash, which covers every field -- so any
+    # drift between the listing as rated and the listing as cached (vehicle
+    # pages yield no price to the detail scraper, for one) silently unlinks a
+    # rating from its listing. This key cannot drift.
+    AI_BY_LISTING = "ai-by-listing"
 
 
 class CounterItem(Enum):

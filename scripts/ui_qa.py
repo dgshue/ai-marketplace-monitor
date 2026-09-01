@@ -23,6 +23,34 @@ time.sleep(2)
 
 os.makedirs("/tmp/qa", exist_ok=True)
 results = []
+
+# ---------- pre-browser unit: the drift-proof rating join ----------
+# Reproduces the field-drift failure that hid a notified vehicle: details
+# cached with price '**unspecified**' while the rating was written against
+# the tile price. The identity join must still attach the rating.
+from ai_marketplace_monitor.utils import cache as _cache, CacheType as _CT
+from ai_marketplace_monitor.webui.activity import build_activity as _ba
+
+_probe_url = "https://qa.invalid/item/qa-drift-probe"
+_cache.set((_CT.LISTING_DETAILS.value, _probe_url),
+           {"marketplace": "facebook", "name": "", "id": "qa-drift-probe",
+            "title": "QA drift probe 2012", "image": "", "price": "**unspecified**",
+            "post_url": _probe_url, "location": "Asheboro, NC", "seller": "qa",
+            "condition": "Used", "description": "drift"},
+           tag=_CT.LISTING_DETAILS.value)
+_cache.set((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"),
+           {"score": 4, "comment": "qa probe", "name": "qa"},
+           tag=_CT.AI_BY_LISTING.value)
+try:
+    _out = _ba(_cache, [Path("/root/.ai-marketplace-monitor/config.toml")], limit=2000)
+    _hit = [r for r in _out["listings"] if r["id"] == "qa-drift-probe"]
+    ok = bool(_hit) and _hit[0]["item"] == "car" and _hit[0]["score"] == 4
+    print(("PASS " if ok else "FAIL ") + "drift-proof rating join",
+          "| row:", _hit[0]["item"] if _hit else "MISSING")
+    results.append(("drift-proof rating join", ok, ""))
+finally:
+    _cache.delete((_CT.LISTING_DETAILS.value, _probe_url))
+    _cache.delete((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"))
 def check(name, ok, extra=""):
     results.append((name, bool(ok), extra))
     print(("PASS " if ok else "FAIL ") + name + (("  | " + str(extra)) if extra else ""))
