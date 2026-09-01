@@ -295,6 +295,12 @@ def build_activity(
                     "title": listing.title,
                     "price": listing.price,
                     "location": listing.location,
+                    "image": listing.image or "",
+                    # Item coordinates for the pickup map; None when the
+                    # location string does not geocode.
+                    "coords": (lambda c: list(c) if c else None)(
+                        resolve(listing.location or "")
+                    ),
                     "distance_mi": distance_from(home, listing.location or ""),
                     "seller": listing.seller,
                     "condition": listing.condition,
@@ -341,6 +347,7 @@ def build_activity(
         bucket["best_score"] = max(bucket["best_score"], row["score"])
 
     return {
+        "home": list(home) if home else None,
         "summary": sorted(summary.values(), key=lambda entry: entry["item"]),
         "listings": rows[:limit],
         "total": len(rows),

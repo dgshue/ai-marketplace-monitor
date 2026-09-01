@@ -13,6 +13,7 @@ import json
 import logging
 import mimetypes
 import os
+import hashlib
 import re
 import secrets
 import socket
@@ -702,6 +703,113 @@ def create_app(
             except OSError:
                 continue
         return {"vars": {name: name in os.environ for name in sorted(referenced)}}
+
+    # ------------------------------------------------------------------
+    # Listing photo snapshots.
+    #
+    # Facebook's CDN URLs are signed, expire, and refuse hotlinked loads, so
+    # the browser cannot show them directly for long. This endpoint fetches
+    # the image server-side ONCE and caches the bytes on disk — a snapshot
+    # that keeps working after the source URL dies.
+    #
+    # SSRF containment: the client never supplies an image URL. It supplies a
+    # listing post URL, which must already exist as a LISTING_DETAILS cache
+    # key, and the fetch goes only to the image URL the scraper stored there.
+    # ------------------------------------------------------------------
+    img_cache_dir = amm_home / "imgcache"
+
+    @app.get("/api/listing-image")
+    def listing_image(post: str, _: str = Depends(require_session)) -> FileResponse:
+        import requests as _requests  # local: server module stays uvicorn-only otherwise
+
+        normalized = post.split("?")[0]
+        details = cache.get((CacheType.LISTING_DETAILS.value, normalized))
+        if not isinstance(details, dict):
+            raise HTTPException(status_code=404, detail="Unknown listing.")
+        image_url = str(details.get("image") or "")
+        if not image_url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=404, detail="Listing has no image.")
+
+        img_cache_dir.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha256(normalized.encode()).hexdigest()[:32]
+        cached = img_cache_dir / (key + ".img")
+        if not cached.exists():
+            try:
+                resp = _requests.get(
+                    image_url,
+                    timeout=15,
+                    headers={
+                        # A plain browser UA and no referrer is what the CDN
+                        # expects from a direct visit.
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                    },
+                    stream=True,
+                )
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=404, detail="Image expired.")
+                content = resp.raw.read(5 * 1024 * 1024 + 1, decode_content=True)
+                if len(content) > 5 * 1024 * 1024:
+                    raise HTTPException(status_code=404, detail="Image too large.")
+                cached.write_bytes(content)
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=404, detail="Image fetch failed.")
+        return FileResponse(
+            cached,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
+
+    # ------------------------------------------------------------------
+    # Drive time via OSRM's public demo router — free, keyless, and fine for
+    # light personal use. Results cache for a day per rounded coordinate pair
+    # so repeated views of the same listing cost nothing.
+    # ------------------------------------------------------------------
+    @app.get("/api/route")
+    def route_estimate(
+        to: str, _: str = Depends(require_session)
+    ) -> Dict[str, Any]:
+        import requests as _requests
+
+        from .activity import home_from_config
+
+        match = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", to)
+        if not match:
+            raise HTTPException(status_code=400, detail="to must be 'lat,lon'")
+        tlat, tlon = float(match.group(1)), float(match.group(2))
+        home = home_from_config(config.config_files)
+        if home is None:
+            raise HTTPException(status_code=404, detail="home_location not set")
+        hlat, hlon = home
+
+        cache_key = (
+            "route-cache",
+            f"{round(hlat, 3)},{round(hlon, 3)}",
+            f"{round(tlat, 3)},{round(tlon, 3)}",
+        )
+        hit = cache.get(cache_key)
+        if isinstance(hit, dict) and hit.get("at", 0) > time.time() - 86400:
+            return hit["result"]
+
+        url = (
+            f"https://router.project-osrm.org/route/v1/driving/"
+            f"{hlon},{hlat};{tlon},{tlat}?overview=false"
+        )
+        try:
+            resp = _requests.get(url, timeout=8)
+            data = resp.json()
+            leg = data["routes"][0]
+            result = {
+                "minutes": round(leg["duration"] / 60),
+                "miles": round(leg["distance"] / 1609.344, 1),
+            }
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            raise HTTPException(status_code=502, detail="Routing unavailable.")
+        cache.set(cache_key, {"at": time.time(), "result": result}, tag="route-cache")
+        return result
 
     @app.get("/api/logs/download")
     def download_log(_: str = Depends(require_session)) -> FileResponse:

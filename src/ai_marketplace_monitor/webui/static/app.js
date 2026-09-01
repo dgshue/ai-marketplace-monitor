@@ -2536,6 +2536,7 @@
   // ---------------------------------------------------------------
   const activity = {
     summary: [],
+    home: null, // [lat, lon] from home_location, for the pickup map
     listings: [],
     total: 0,
     truncated: false,
@@ -2557,6 +2558,7 @@
       if (!res.ok) return;
       const data = await res.json();
       activity.summary = data.summary || [];
+      activity.home = data.home || null;
       activity.listings = data.listings || [];
       activity.total = data.total || 0;
       activity.truncated = !!data.truncated;
@@ -2646,6 +2648,10 @@
     const host = $("#deal-detail");
     if (!host) return;
     if (!row) {
+      if (dealMap) {
+        dealMap.remove();
+        dealMap = null;
+      }
       host.innerHTML =
         '<div class="dd-empty">Select a listing to read the AI\u2019s reasoning.</div>';
       return;
@@ -2673,6 +2679,18 @@
         ${row.seller ? `<span class="k">Seller</span><span>${esc(row.seller)}</span>` : ""}
         <span class="k">Threshold</span><span>notify at \u2265 ${row.threshold}</span>
       </div>
+      ${
+        row.image
+          ? `<img class="dd-photo" alt="listing photo" loading="lazy"
+               src="/api/listing-image?post=${encodeURIComponent(row.url)}"
+               onerror="this.remove()" />`
+          : ""
+      }
+      ${
+        row.coords && activity.home && row.marketplace === "facebook"
+          ? '<div id="dd-map" class="dd-map"></div><div id="dd-route" class="dd-route"></div>'
+          : ""
+      }
       <div class="dd-ai"><div class="h">Why the AI scored it ${row.score}/5${
         row.ai_name ? " \u00B7 " + esc(row.ai_name) : ""
       }</div>${esc(row.comment || "(no reasoning recorded)")}</div>
@@ -2694,6 +2712,61 @@
           row.my_rank ? "click the same star to clear" : "your own read, separate from the AI's"
         }</span>
       </div>`;
+  };
+
+  // Leaflet map + OSRM drive time for the selected physical listing.
+  // The map instance is torn down per selection; tiles are OSM's public
+  // servers (attribution required), routing is OSRM's demo router — both
+  // free for light personal use, cached server-side for a day.
+  let dealMap = null;
+  const mountDealExtras = (row) => {
+    const mapHost = $("#dd-map");
+    if (dealMap) {
+      dealMap.remove();
+      dealMap = null;
+    }
+    if (!mapHost || !window.L || !row.coords || !activity.home) return;
+    const item = row.coords;
+    const home = activity.home;
+    dealMap = L.map(mapHost, { zoomControl: false, attributionControl: true });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 17,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(dealMap);
+    const icon = L.icon({
+      iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
+      iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
+      shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+    });
+    L.marker(home, { icon, title: "Home" }).addTo(dealMap);
+    L.marker(item, { icon, title: row.location }).addTo(dealMap);
+    L.polyline([home, item], { weight: 2, opacity: 0.6 }).addTo(dealMap);
+    dealMap.fitBounds([home, item], { padding: [28, 28] });
+
+    const routeHost = $("#dd-route");
+    if (!routeHost) return;
+    if (row._route) {
+      routeHost.textContent = row._route;
+      return;
+    }
+    routeHost.textContent = "estimating drive\u2026";
+    api(`/api/route?to=${item[0]},${item[1]}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((r) => {
+        if (!r) {
+          routeHost.textContent = "";
+          return;
+        }
+        const h = Math.floor(r.minutes / 60);
+        const m = r.minutes % 60;
+        row._route = `\u2248 ${h ? h + "h " : ""}${m}m drive for pickup \u00B7 ${r.miles} mi by road`;
+        routeHost.textContent = row._route;
+      })
+      .catch(() => {
+        routeHost.textContent = "";
+      });
   };
 
   const sendFlag = async (row, payload) => {
@@ -2783,6 +2856,7 @@
       .join("");
 
     renderDealDetail(selectedRow);
+    mountDealExtras(selectedRow);
   };
 
   // ---------------------------------------------------------------
