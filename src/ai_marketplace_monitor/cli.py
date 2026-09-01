@@ -192,6 +192,14 @@ def main(
         log_broadcast_handler.setLevel(logging.DEBUG)
         log_handlers.append(log_broadcast_handler)
 
+    # Every handler -- file, console, browser stream -- scrubs secrets before
+    # formatting. The file handler had no redaction at all and the on-disk log
+    # is downloadable from the web UI.
+    from .webui.log_handler import SecretRedactingFilter
+
+    for handler in log_handlers:
+        handler.addFilter(SecretRedactingFilter())
+
     logging.basicConfig(
         level="DEBUG",
         format="%(message)s",
@@ -210,6 +218,9 @@ def main(
         # itself a modification of the watched directory, and the loop fills
         # the log and all its rotations with "in-event <InotifyEvent ...>".
         "watchdog",
+        # schedule logs "Running job Job(...)" at DEBUG with the job's args in
+        # the repr -- the whole marketplace config, credentials included.
+        "schedule",
     ):
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 

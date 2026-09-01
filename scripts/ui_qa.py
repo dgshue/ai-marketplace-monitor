@@ -9,6 +9,10 @@ from playwright.sync_api import sync_playwright
 
 logging.basicConfig(level=logging.ERROR)
 log = logging.getLogger("qa")
+# Capture the deployment's real credential before the harness overrides it,
+# so the log-download check can test for the actual value rather than a
+# marker (scrubs and redactors use different markers; the secret is the truth).
+_REAL_PASSWORD = os.environ.get("FACEBOOK_PASSWORD", "")
 os.environ["FACEBOOK_USERNAME"] = "t@e.com"
 os.environ["FACEBOOK_PASSWORD"] = "pw"
 
@@ -125,6 +129,22 @@ with sync_playwright() as p:
     pg.click("#login-submit")
     pg.wait_for_timeout(4000)
     check("login", not pg.eval_on_selector("#app", "e=>e.classList.contains('hidden')"))
+
+    # ---------- the downloadable log carries no credentials ----------
+    # Uses the browser context's session cookie, exactly as a user's download would.
+    import re as _re
+
+    _dl = pg.request.get("http://127.0.0.1:8476/api/logs/download")
+    _body = _dl.text() if _dl.ok else ""
+    _real_hits = _body.count(_REAL_PASSWORD) if len(_REAL_PASSWORD) >= 4 else 0
+    _unmasked = _re.findall(
+        r"password\s*=\s*['\"](?!\*\*\*REDACTED|<redacted>)[^'\"]+['\"]", _body
+    )
+    check(
+        "downloaded log has no plaintext password",
+        _dl.ok and not _real_hits and not _unmasked,
+        f"HTTP {_dl.status}, {len(_body)} bytes, real={_real_hits}, unmasked={len(_unmasked)}",
+    )
 
     # ---------- deals ----------
     n_rows = pg.eval_on_selector_all(".dli", "e=>e.length")

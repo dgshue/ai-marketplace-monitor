@@ -33,6 +33,14 @@ _SECRET_PATTERNS = [
         re.compile(r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['\"]?[A-Za-z0-9._\-]{12,}['\"]?"),
         r"\1=***REDACTED***",
     ),
+    # Dataclass reprs (`FacebookMarketplaceConfig(... password='hunter2' ...)`)
+    # reach the log through third-party DEBUG output -- the `schedule` library
+    # logs every Job repr, args included. Passwords have no length floor and
+    # may contain punctuation, so match up to the closing quote.
+    (
+        re.compile(r"(?i)(password|passwd)\s*[:=]\s*(['\"])(?:(?!\2).)+\2"),
+        r"\1=***REDACTED***",
+    ),
 ]
 
 # Rich markup like "[bold red]foo[/bold red]" and ANSI escapes. We ship
@@ -45,6 +53,29 @@ def _redact(text: str) -> str:
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     return text
+
+
+class SecretRedactingFilter(logging.Filter):
+    """Scrub secrets from every record before any handler formats it.
+
+    The browser stream already redacts on the way out; the file handler did
+    not, so the on-disk log (downloadable from the web UI) carried the
+    Facebook password inside third-party DEBUG reprs. Attaching this to every
+    handler makes the file, the console and the stream agree. A record whose
+    message changes is rewritten with its args already interpolated, so the
+    handler cannot re-introduce the secret via %-formatting.
+    """
+
+    def filter(self: "SecretRedactingFilter", record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        redacted = _redact(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
 
 
 def _clean(text: str) -> str:
