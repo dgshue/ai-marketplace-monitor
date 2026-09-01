@@ -1860,6 +1860,22 @@
   // FORM_SCHEMAS cover the modal; these cover the card, and carry the "why"
   // that the schema hints never had room for.
   const INLINE_HELP = {
+    phrases: {
+      hint: "What gets typed into each marketplace's search box. This only decides what is fetched — the AI does the judging afterwards.",
+      ex: "Add variants sellers actually type, not synonyms of your own. \u201Crtx 3090\u201D and \u201Cgeforce 3090\u201D surface different listings; \u201Cnvidia graphics card\u201D would just flood you.",
+    },
+    description: {
+      hint: "Plain English, read by the AI on every listing. The single biggest lever on match quality.",
+      ex: "Say what disqualifies as well as what qualifies: \u201C24GB card, must post video, no mining rigs, no water-cooled loops I\u2019d have to drain.\u201D",
+    },
+    prices: {
+      hint: "A hard filter applied before the AI sees anything — listings outside it are never fetched or rated.",
+      ex: "Leave the ceiling a little above your real limit. A seller who lists at $1,600 and takes $1,400 never appears if you cap at $1,500.",
+    },
+    antikeywords: {
+      hint: "Cheap text filters run before the AI, to keep obvious junk out of your token spend.",
+      ex: "Keep these blunt. Subtle judgements — \u201Cnot mined on\u201D — belong in the description above, where the AI can weigh them.",
+    },
     threshold: {
       hint: "Listings the AI scores below this are still fetched, rated and listed under Activity as dismissed — they just never reach your phone.",
       ex: "3 gives you nearly everything the search returns. 5 only great deals. 4 is the useful middle for something you actually want.",
@@ -1931,90 +1947,241 @@
   const marketplaceNames = () =>
     state.sections.filter((s) => s.prefix === "marketplace").map((s) => s.suffix);
 
+  const chipsInput = (section, key, values, opts = {}) => {
+    const chips = (values || [])
+      .map(
+        (v) =>
+          `<span class="chip2 ${opts.neg ? "neg" : ""}">${esc(v)}<x data-chip-del="${esc(
+            key
+          )}" data-chip-val="${esc(v)}">×</x></span>`
+      )
+      .join("");
+    return `<div class="chips" data-chips="${esc(key)}">${chips}
+      <input type="text" data-chip-add="${esc(key)}" placeholder="${esc(
+        opts.placeholder || "add…"
+      )}" autocomplete="off" /></div>`;
+  };
+
   const renderItemCard = (section) => {
     const fields = fieldsForSection(section);
     const enabled = fields.enabled !== false;
-    const phrases = []
-      .concat(fields.search_phrases || [])
-      .map((p) => `“${p}”`)
-      .join(", ");
+    const open = state.openItems && state.openItems.has(section.name);
+    const phrases = [].concat(fields.search_phrases || []);
+    const anti = [].concat(fields.antikeywords || []);
 
-    // `rating` is int or [initial, subsequent]; the steady-state value is the
-    // one that governs every run after the first.
     let threshold = fields.rating;
     if (Array.isArray(threshold)) threshold = threshold[threshold.length - 1];
+    let inherited = 3;
+    for (const mk of state.sections.filter((x) => x.prefix === "marketplace")) {
+      let r = fieldsForSection(mk).rating;
+      if (Array.isArray(r)) r = r[r.length - 1];
+      if (typeof r === "number") inherited = r;
+    }
+    const effective = threshold || inherited;
 
-    const bound = fields.marketplace
-      ? [].concat(fields.marketplace)
-      : null; // null means every marketplace
+    // Live performance numbers from the Deals data, so the card answers
+    // "is this hunt working" without leaving the page.
+    const sum = (activity.summary || []).find((x) => x.item === (section.suffix || section.name));
 
+    const bound = fields.marketplace ? [].concat(fields.marketplace) : null;
+    const SRC_SUB = { facebook: "browser · local pickup", ebay: "Browse API · ships" };
     const sources = marketplaceNames()
       .map((mk) => {
         const on = bound === null || bound.includes(mk);
-        return `<span class="src-toggle ${on ? "on" : ""}" data-src="${esc(mk)}">
-          <span class="pip"></span>${esc(mk)}</span>`;
+        return `<span class="src ${on ? "on" : ""}" data-src="${esc(mk)}">
+          <span class="sw ${on ? "on" : ""}"><i></i></span>
+          <span><span class="nm">${esc(mk)}</span><br /><span class="st">${esc(
+            SRC_SUB[mk] || "marketplace"
+          )}</span></span></span>`;
       })
       .join("");
 
     const thrButtons = [1, 2, 3, 4, 5]
-      .map(
-        (n) =>
-          `<button data-thr="${n}" class="${threshold === n ? "on" : ""}">${n}</button>`
-      )
+      .map((n) => `<button data-thr="${n}" class="${threshold === n ? "on" : ""}">${n}</button>`)
       .join("");
 
+    const priceVal = (v) => (v == null ? "" : String(v).replace(/USD/i, "").trim());
+
     return `
-    <div class="config-card item-card ${enabled ? "" : "disabled"}" data-section="${esc(
+    <div class="item-card icard ${open ? "open" : ""} ${enabled ? "" : "disabled"}" data-section="${esc(
       section.name
     )}">
-      <div class="config-card-head">
-        <span class="config-card-name">${esc(section.suffix || section.name)}</span>
-        <span class="config-field"><span class="v">${esc(phrases || "no search phrases")}</span></span>
-        <span class="config-card-actions">
-          <button data-act="edit">More settings</button>
-          <button data-act="duplicate">Duplicate</button>
-          <button data-act="delete" class="danger">Delete</button>
+      <div class="ihead">
+        <span class="caret">▸</span>
+        <span class="iname">${esc(section.suffix || section.name)}</span>
+        <span class="iphrases">${esc(phrases.map((x) => `“${x}”`).join(", "))}</span>
+        <span class="istat">
+          ${sum ? `<span><b>${sum.examined}</b> examined</span>
+                  <span class="hit"><b>${sum.promising}</b> promising</span>` : ""}
+          <span>notify ≥ <b>${effective}</b></span>
+          <span class="sw ${enabled ? "on" : ""}" data-toggle="enabled" title="${
+      enabled ? "Pause this item" : "Enable this item"
+    }"><i></i></span>
         </span>
       </div>
+      <div class="ibody">
 
-      <div class="inline-row">
-        <span class="inline-label">Enabled</span>
-        <span class="sw ${enabled ? "on" : ""}" data-toggle="enabled"><i></i></span>
-        ${helpBlock("enabled")}
-      </div>
+        <div class="irow">
+          <div class="lab">Search phrases</div>
+          <div class="fld">
+            ${chipsInput(section, "search_phrases", phrases, { placeholder: "add a phrase…" })}
+            ${helpBlock("phrases")}
+          </div>
+        </div>
 
-      <div class="inline-row">
-        <span class="inline-label">Notify at rating</span>
-        <span class="thr">${thrButtons}</span>
-        <span class="thr-note">${
-          threshold
-            ? `≥ ${threshold} — ${THRESHOLD_WORDS[threshold]}`
-            : (() => {
-                // Surface the value being inherited; "inherited" alone reads
-                // as "unknown", which is what made this control confusing.
-                let inherited = 3;
-                for (const mk of state.sections.filter((x) => x.prefix === "marketplace")) {
-                  let r = fieldsForSection(mk).rating;
-                  if (Array.isArray(r)) r = r[r.length - 1];
-                  if (typeof r === "number") inherited = r;
-                }
-                return `inherited from marketplace (≥ ${inherited} — ${THRESHOLD_WORDS[inherited]})`;
-              })()
-        }</span>
-        ${helpBlock("threshold")}
-      </div>
+        <div class="irow">
+          <div class="lab">What a good one looks like</div>
+          <div class="fld">
+            <textarea data-field="description" rows="2" placeholder="Describe a good listing — the AI reads this on every candidate.">${esc(
+              fields.description || ""
+            )}</textarea>
+            ${helpBlock("description")}
+          </div>
+        </div>
 
-      <div class="inline-row">
-        <span class="inline-label">Search on</span>
-        ${sources || '<span class="thr-note">no marketplaces configured</span>'}
-        ${helpBlock("sources")}
+        <div class="irow">
+          <div class="lab">Price range</div>
+          <div class="fld">
+            <div class="inrow">
+              <input type="text" class="w90" data-field="min_price" value="${esc(
+                priceVal(fields.min_price)
+              )}" placeholder="min" autocomplete="off" />
+              <span class="range-sep">to</span>
+              <input type="text" class="w90" data-field="max_price" value="${esc(
+                priceVal(fields.max_price)
+              )}" placeholder="max" autocomplete="off" />
+              <span class="range-sep">USD</span>
+            </div>
+            ${helpBlock("prices")}
+          </div>
+        </div>
+
+        <div class="irow">
+          <div class="lab">Notify when AI rates</div>
+          <div class="fld">
+            <div class="inrow">
+              <span class="thr">${thrButtons}</span>
+              <span class="thr-note">${
+                threshold
+                  ? `≥ ${threshold} — ${THRESHOLD_WORDS[threshold]}`
+                  : `inherited from marketplace (≥ ${inherited} — ${THRESHOLD_WORDS[inherited]})`
+              }</span>
+            </div>
+            ${helpBlock("threshold")}
+          </div>
+        </div>
+
+        <div class="irow">
+          <div class="lab">Search on</div>
+          <div class="fld">
+            <div class="inrow">${sources || '<span class="thr-note">no marketplaces configured</span>'}</div>
+            ${helpBlock("sources")}
+          </div>
+        </div>
+
+        <div class="irow">
+          <div class="lab">Must-not contain</div>
+          <div class="fld">
+            ${chipsInput(section, "antikeywords", anti, { neg: true, placeholder: "add an exclusion…" })}
+            ${helpBlock("antikeywords")}
+          </div>
+        </div>
+
+        <div class="irow more-row">
+          <div class="lab"></div>
+          <div class="fld"><div class="inrow">
+            <button class="ghost small" data-act="edit">More settings…</button>
+            <button class="ghost small" data-act="duplicate">Duplicate</button>
+            <button class="ghost small danger" data-act="delete">Delete</button>
+          </div></div>
+        </div>
       </div>
     </div>`;
+  };
+
+  // ---- Sources / plumbing strip, per the mockup: one status card per
+  // configured backend, with env-var resolution where the card uses one.
+  const envRefsIn = (fields) => {
+    const refs = [];
+    const scan = (v) => {
+      if (typeof v === "string") {
+        const m = v.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+        if (m) refs.push(m[1]);
+      } else if (Array.isArray(v)) v.forEach(scan);
+    };
+    Object.values(fields || {}).forEach(scan);
+    return refs;
+  };
+
+  const renderSourceCards = () => {
+    const cards = [];
+    const env = state.envVars || {};
+    const fb = (state.monitorInfo && state.monitorInfo.fb_session) || {};
+
+    for (const mk of state.sections.filter((x) => x.prefix === "marketplace")) {
+      const f = fieldsForSection(mk);
+      const kind = String(f.market_type || mk.suffix || "facebook").toLowerCase();
+      let dot = "ok";
+      let detail = "";
+      if (kind === "facebook") {
+        if (fb.logged_in) detail = "signed in · session saved";
+        else if (fb.exists) { dot = "warn"; detail = "anonymous session — log in via the Browser view"; }
+        else { dot = "warn"; detail = "not signed in yet"; }
+      } else if (kind === "ebay") {
+        detail = "Browse API";
+      }
+      if (f.enabled === false) { dot = "dim"; detail = "disabled"; }
+      const refs = envRefsIn(f);
+      if (refs.some((r) => env[r] === false)) dot = "err";
+      cards.push(`
+        <div class="set">
+          <div class="t"><span class="state-dot ${dot}"></span>${esc(mk.suffix || mk.name)}</div>
+          <div class="d">${esc(detail)}</div>
+          ${refs.map((r) => `<div class="envline"><span class="${env[r] ? "okv" : "bad"}">${
+            env[r] ? "✓" : "✗"
+          } ${esc(r)} ${env[r] ? "set" : "not set"}</span></div>`).join("")}
+          <button class="ghost small edit" data-edit-section="${esc(mk.name)}">Edit</button>
+        </div>`);
+    }
+    for (const ai of state.sections.filter((x) => x.prefix === "ai")) {
+      const f = fieldsForSection(ai);
+      cards.push(`
+        <div class="set">
+          <div class="t"><span class="state-dot ok"></span>${esc(ai.suffix || ai.name)}</div>
+          <div class="d">${esc([f.model, f.base_url].filter(Boolean).join(" · ") || "AI backend")}</div>
+          <button class="ghost small edit" data-edit-section="${esc(ai.name)}">Edit</button>
+        </div>`);
+    }
+    for (const nt of state.sections.filter((x) => x.prefix === "notification")) {
+      const f = fieldsForSection(nt);
+      const refs = envRefsIn(f);
+      const dot = refs.some((r) => env[r] === false) ? "err" : "ok";
+      cards.push(`
+        <div class="set">
+          <div class="t"><span class="state-dot ${dot}"></span>${esc(nt.suffix || nt.name)}</div>
+          <div class="d">${esc(f.ntfy_server ? "server " + f.ntfy_server : "notification channel")}</div>
+          ${refs.map((r) => `<div class="envline"><span class="${env[r] ? "okv" : "bad"}">${
+            env[r] ? "✓" : "✗"
+          } ${esc(r)} ${env[r] ? "set" : "not set"}</span></div>`).join("")}
+          <button class="ghost small edit" data-edit-section="${esc(nt.name)}">Edit</button>
+        </div>`);
+    }
+    for (const us of state.sections.filter((x) => x.prefix === "user")) {
+      const f = fieldsForSection(us);
+      cards.push(`
+        <div class="set">
+          <div class="t"><span class="state-dot ok"></span>${esc(us.suffix || us.name)}</div>
+          <div class="d">notify via ${esc([].concat(f.notify_with || []).join(", ") || "—")}</div>
+          <button class="ghost small edit" data-edit-section="${esc(us.name)}">Edit</button>
+        </div>`);
+    }
+    return cards.join("");
   };
 
   const renderConfigForm = () => {
     const host = $("#config-form-body");
     if (!host) return;
+    if (!state.openItems) state.openItems = new Set();
 
     if (!state.sections.length) {
       host.innerHTML =
@@ -2022,82 +2189,34 @@
       return;
     }
 
-    const known = new Set(CONFIG_GROUPS.map((g) => g.prefix));
-    const groups = CONFIG_GROUPS.concat(
-      // Anything the config uses that we have no group for still has to be
-      // reachable, or the form tab would silently hide part of the file.
-      Array.from(new Set(state.sections.map((s) => s.prefix)))
-        .filter((p) => !known.has(p))
-        .map((p) => ({ prefix: p, title: p, addable: false }))
-    );
+    const items = state.sections.filter((x) => x.prefix === "item");
+    const itemCards = items.map(renderItemCard).join("");
 
-    host.innerHTML = groups
-      .map((group) => {
-        const sections = state.sections.filter((s) => s.prefix === group.prefix);
-        if (!sections.length && !group.addable) return "";
+    const known = new Set(["item", "marketplace", "ai", "user", "notification", "translation", "monitor", "region"]);
+    const strays = state.sections.filter((x) => !known.has(x.prefix));
+    const strayBlock = strays.length
+      ? `<div class="sechead">Other sections</div>` +
+        strays
+          .map(
+            (x) => `<div class="set"><div class="t">[${esc(x.name)}]</div>
+              <button class="ghost small edit" data-edit-section="${esc(x.name)}">Edit</button></div>`
+          )
+          .join("")
+      : "";
 
-        const cards = sections
-          .map((section) => {
-            // Items are what you actually manage, so they get the richer card
-            // with the frequent edits inline instead of behind a modal.
-            if (group.prefix === "item") return renderItemCard(section);
-            const fields = fieldsForSection(section);
-            const keys = SUMMARY_KEYS[group.prefix] || [];
-            const shown = keys
-              .filter((k) => fields[k] !== undefined)
-              .map(
-                (k) =>
-                  `<span class="config-field"><span class="k">${esc(k)}</span>` +
-                  `<span class="v">${esc(formatConfigValue(fields[k]))}</span></span>`
-              );
-            const extra = Object.keys(fields).length - shown.length;
-            const hasSchema = !!findFormSchema(section.name);
-            return `
-            <div class="config-card" data-section="${esc(section.name)}">
-              <div class="config-card-head">
-                <span class="config-card-name">[${esc(section.name)}]</span>
-                <span class="config-card-actions">
-                  <button data-act="edit">Edit</button>
-                  <button data-act="duplicate">Duplicate</button>
-                  <button data-act="delete" class="danger">Delete</button>
-                </span>
-              </div>
-              ${
-                shown.length
-                  ? `<div class="config-card-fields">${shown.join("")}</div>`
-                  : '<div class="config-card-fields"><span class="config-field"><span class="v unset">no settings</span></span></div>'
-              }
-              ${extra > 0 ? `<div class="config-card-more">+${extra} more</div>` : ""}
-              ${
-                hasSchema
-                  ? ""
-                  : '<div class="config-noschema">No form for this section type — Edit opens the TOML instead.</div>'
-              }
-            </div>`;
-          })
-          .join("");
-
-        return `
-        <div class="config-group">
-          <div class="config-group-head">
-            <span class="config-group-title">${esc(group.title)}</span>
-            <div class="toolbar-spacer"></div>
-            ${
-              group.addable
-                ? `<button class="toolbar-btn small" data-add="${esc(group.prefix)}">+ Add</button>`
-                : ""
-            }
-          </div>
-          ${cards || '<div class="config-form-empty">None configured.</div>'}
-        </div>`;
-      })
-      .join("");
+    host.innerHTML =
+      `<div class="hunt-head">
+        <button class="primary-btn" data-add="item">+ Add item</button>
+      </div>` +
+      (itemCards || '<div class="config-form-empty">Nothing hunted yet — add an item.</div>') +
+      `<div class="sechead">Sources &amp; plumbing</div>
+       <div class="setgrid">${renderSourceCards()}</div>` +
+      strayBlock;
 
     const sub = $("#hunting-sub");
     if (sub) {
-      const items = state.sections.filter((s) => s.prefix === "item").length;
       const sources = marketplaceNames().length;
-      sub.textContent = `${items} item${items === 1 ? "" : "s"} · ${sources} source${
+      sub.textContent = `${items.length} item${items.length === 1 ? "" : "s"} · ${sources} source${
         sources === 1 ? "" : "s"
       }`;
     }
@@ -2164,9 +2283,44 @@
         openAddSectionModal(addBtn.dataset.add);
         return;
       }
+
+      const editLink = e.target.closest("[data-edit-section]");
+      if (editLink) {
+        openEditSectionModal(editLink.dataset.editSection);
+        return;
+      }
+
+      const chipDel = e.target.closest("[data-chip-del]");
+      if (chipDel) {
+        const cardEl = chipDel.closest("[data-section]");
+        if (!cardEl) return;
+        const sec = state.sections.find((x) => x.name === cardEl.dataset.section);
+        if (!sec) return;
+        const key = chipDel.dataset.chipDel;
+        const current = [].concat(fieldsForSection(sec)[key] || []);
+        const next = current.filter((v) => v !== chipDel.dataset.chipVal);
+        if (key === "search_phrases" && !next.length) {
+          setEditorStatus("An item needs at least one search phrase.", "error");
+          return;
+        }
+        applyInline(cardEl.dataset.section, key, next.length ? next : null);
+        return;
+      }
+
+      const head = e.target.closest(".ihead");
+      if (head && !e.target.closest(".sw") && !e.target.closest("button")) {
+        const cardEl = head.closest("[data-section]");
+        if (cardEl) {
+          const name = cardEl.dataset.section;
+          if (state.openItems.has(name)) state.openItems.delete(name);
+          else state.openItems.add(name);
+          renderConfigForm();
+        }
+        return;
+      }
       const actionBtn = e.target.closest("[data-act]");
       if (!actionBtn) return;
-      const card = actionBtn.closest(".config-card");
+      const card = actionBtn.closest("[data-section]");
       if (!card) return;
       const section = state.sections.find((s) => s.name === card.dataset.section);
       if (!section) return;
@@ -2175,6 +2329,47 @@
       else if (act === "duplicate") duplicateSection(section);
       else if (act === "delete") deleteSection(section);
     });
+  }
+
+  // Chips add on Enter; text fields commit on change (blur). Bare integers
+  // write as TOML ints, empty clears the key.
+  if (configFormBody) {
+    configFormBody.addEventListener("keydown", (e) => {
+      const input = e.target.closest("[data-chip-add]");
+      if (!input || e.key !== "Enter") return;
+      e.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;
+      const cardEl = input.closest("[data-section]");
+      const sec = state.sections.find((x) => x.name === cardEl.dataset.section);
+      if (!sec) return;
+      const key = input.dataset.chipAdd;
+      const current = [].concat(fieldsForSection(sec)[key] || []);
+      if (current.includes(value)) return;
+      // Keep focus usable across the re-render: remember which card + key.
+      const section = cardEl.dataset.section;
+      applyInline(section, key, current.concat([value]));
+      const again = configFormBody.querySelector(
+        `[data-section="${CSS.escape(section)}"] [data-chip-add="${CSS.escape(key)}"]`
+      );
+      if (again) again.focus();
+    });
+
+    configFormBody.addEventListener(
+      "change",
+      (e) => {
+        const field = e.target.closest("[data-field]");
+        if (!field) return;
+        const cardEl = field.closest("[data-section]");
+        if (!cardEl) return;
+        const key = field.dataset.field;
+        const raw = field.value.trim();
+        let value = null;
+        if (raw) value = /^-?\d+$/.test(raw) ? parseInt(raw, 10) : raw;
+        applyInline(cardEl.dataset.section, key, value);
+      },
+      true
+    );
   }
 
   const showConfigView = (view) => {

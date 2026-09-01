@@ -1427,3 +1427,189 @@ table.status-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 
 .dd-actions .ghost:hover { color: var(--text); border-color: var(--accent); }
+
+/* ---------------------------------------------------------------
+   Config v3 — the item-centric design from the mockup, ported as
+   specified: collapsible item cards, labeled rows, chips inputs,
+   source pills with sublabels, and the sources/plumbing strip.
+   --------------------------------------------------------------- */
+
+.config-form-body { max-width: 1180px; margin: 0 auto; width: 100%; }
+
+.hunt-head { display: flex; justify-content: flex-end; margin: 2px 0 12px; }
+
+.primary-btn {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  color: #fff;
+  border-radius: 7px;
+  padding: 6px 13px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.icard {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border-left-width: 1px; /* the old item-card accent bar is gone in this design */
+  padding: 0;
+}
+
+.icard.disabled { opacity: 0.6; }
+
+.ihead {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.iname { font-size: 15.5px; font-weight: 600; }
+
+.iphrases {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.istat {
+  margin-left: auto;
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  align-items: center;
+  flex: none;
+}
+
+.istat b { color: var(--text); }
+.istat .hit b { color: var(--ok); }
+
+.icard .caret { color: var(--text-dim); transition: transform 0.15s; flex: none; }
+.icard.open .caret { transform: rotate(90deg); }
+
+.ibody { display: none; padding: 4px 14px 15px; border-top: 1px solid var(--border); }
+.icard.open .ibody { display: block; }
+
+.irow {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: 10px 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(42, 48, 64, 0.5);
+  align-items: start;
+}
+
+.irow:last-child, .irow.more-row { border-bottom: 0; }
+.irow .lab { font-size: 13px; padding-top: 6px; color: var(--text); }
+.irow .fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.irow textarea {
+  width: 100%;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+.irow input[type="text"] {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 13px;
+}
+.irow textarea:focus, .irow input:focus { outline: 0; border-color: var(--accent); }
+.w90 { width: 90px; }
+
+.chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 7px;
+  min-height: 34px;
+}
+
+.chip2 {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 2px 9px;
+  font-size: 12px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.chip2.neg { border-color: #5a3038; color: #f0a8b0; }
+.chip2 x { cursor: pointer; color: var(--text-dim); font-style: normal; }
+.chip2 x:hover { color: var(--err); }
+
+.chips input {
+  background: transparent !important;
+  border: 0 !important;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 2px !important;
+  min-width: 110px;
+  outline: 0;
+  flex: 1;
+}
+
+.src {
+  display: inline-flex;
+  gap: 9px;
+  align-items: center;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.src.on { border-color: var(--accent); }
+.src .nm { font-size: 13px; }
+.src .st { font-size: 11px; color: var(--text-dim); }
+
+.setgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+  gap: 11px;
+}
+
+.set {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 13px;
+}
+
+.set .t { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 7px; }
+.set .d { color: var(--text-dim); font-size: 12px; margin-top: 5px; }
+.set .edit { margin-top: 9px; }
+
+.sechead {
+  margin: 26px 0 10px;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.ghost.small.danger:hover { color: var(--err); border-color: var(--err); }
+.range-sep { font-size: 12px; color: var(--text-dim); }

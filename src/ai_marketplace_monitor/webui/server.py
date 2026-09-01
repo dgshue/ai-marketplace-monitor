@@ -681,9 +681,12 @@ def create_app(
         referenced: set = set()
         for path in config.config_files:
             try:
-                referenced |= set(
-                    re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", path.read_text(encoding="utf-8"))
-                )
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    # Commented-out examples reference vars nobody needs set;
+                    # listing those as "not set" is noise, not signal.
+                    if line.lstrip().startswith("#"):
+                        continue
+                    referenced |= set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", line))
             except OSError:
                 continue
         return {"vars": {name: name in os.environ for name in sorted(referenced)}}
