@@ -2673,44 +2673,50 @@
       <div class="dd-price">${esc(row.price)}${
         row.distance_mi != null ? `<span class="dist">${row.distance_mi} mi away</span>` : ""
       }</div>
-      <div class="dd-kv">
-        ${row.location ? `<span class="k">Location</span><span>${esc(row.location)}</span>` : ""}
-        ${row.condition ? `<span class="k">Condition</span><span>${esc(row.condition)}</span>` : ""}
-        ${row.seller ? `<span class="k">Seller</span><span>${esc(row.seller)}</span>` : ""}
-        <span class="k">Threshold</span><span>notify at \u2265 ${row.threshold}</span>
-      </div>
-      ${
-        row.image
-          ? `<img class="dd-photo" alt="listing photo" loading="lazy"
-               src="/api/listing-image?post=${encodeURIComponent(row.url)}"
-               onerror="this.remove()" />`
-          : ""
-      }
-      ${
-        row.coords && activity.home && row.marketplace === "facebook"
-          ? '<div id="dd-map" class="dd-map"></div><div id="dd-route" class="dd-route"></div>'
-          : ""
-      }
-      <div class="dd-ai"><div class="h">Why the AI scored it ${row.score}/5${
-        row.ai_name ? " \u00B7 " + esc(row.ai_name) : ""
-      }</div>${esc(row.comment || "(no reasoning recorded)")}</div>
-      <div class="dd-actions">
-        ${row.url ? `<a class="primary" href="${esc(row.url)}" target="_blank" rel="noopener">Open listing \u2197</a>` : ""}
-        <button class="ghost small" data-flag="hide">${row.hidden ? "Restore" : "Dismiss"}</button>
-      </div>
-      <div class="dd-myrank">
-        <span class="k">My rating</span>
-        <span class="stars" data-flag="rank">${[1, 2, 3, 4, 5]
-          .map(
-            (n) =>
-              `<button class="star ${row.my_rank >= n ? "on" : ""}" data-rank="${n}">${
-                row.my_rank >= n ? "\u2605" : "\u2606"
-              }</button>`
-          )
-          .join("")}</span>
-        <span class="hint">${
-          row.my_rank ? "click the same star to clear" : "your own read, separate from the AI's"
-        }</span>
+      <div class="dd-cols">
+        <div class="dd-main">
+          <div class="dd-kv">
+            ${row.location ? `<span class="k">Location</span><span>${esc(row.location)}</span>` : ""}
+            ${row.condition ? `<span class="k">Condition</span><span>${esc(row.condition)}</span>` : ""}
+            ${row.seller ? `<span class="k">Seller</span><span>${esc(row.seller)}</span>` : ""}
+            <span class="k">Threshold</span><span>notify at \u2265 ${row.threshold}</span>
+          </div>
+          <div class="dd-ai"><div class="h">Why the AI scored it ${row.score}/5${
+            row.ai_name ? " \u00B7 " + esc(row.ai_name) : ""
+          }</div>${esc(row.comment || "(no reasoning recorded)")}</div>
+          <div class="dd-actions">
+            ${row.url ? `<a class="primary" href="${esc(row.url)}" target="_blank" rel="noopener">Open listing \u2197</a>` : ""}
+            <button class="ghost small" data-flag="hide">${row.hidden ? "Restore" : "Dismiss"}</button>
+          </div>
+          <div class="dd-myrank">
+            <span class="k">My rating</span>
+            <span class="stars" data-flag="rank">${[1, 2, 3, 4, 5]
+              .map(
+                (n) =>
+                  `<button class="star ${row.my_rank >= n ? "on" : ""}" data-rank="${n}">${
+                    row.my_rank >= n ? "\u2605" : "\u2606"
+                  }</button>`
+              )
+              .join("")}</span>
+            <span class="hint">${
+              row.my_rank ? "click the same star to clear" : "your own read, separate from the AI's"
+            }</span>
+          </div>
+        </div>
+        <div class="dd-side">
+          ${
+            row.image
+              ? `<img class="dd-photo" alt="listing photo" loading="lazy"
+                   src="/api/listing-image?post=${encodeURIComponent(row.url)}"
+                   onerror="this.remove()" />`
+              : ""
+          }
+          ${
+            row.coords && activity.home && row.marketplace === "facebook"
+              ? '<div id="dd-map" class="dd-map"></div><div id="dd-route" class="dd-route"></div>'
+              : ""
+          }
+        </div>
       </div>`;
   };
 

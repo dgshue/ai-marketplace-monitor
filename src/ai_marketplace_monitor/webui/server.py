@@ -724,7 +724,7 @@ def create_app(
 
     @app.get("/api/listing-image")
     def listing_image(post: str, _: str = Depends(require_session)) -> FileResponse:
-        import requests as _requests  # local: server module stays uvicorn-only otherwise
+        import requests as _requests  # type: ignore  # local: server module stays uvicorn-only otherwise
 
         normalized = post.split("?")[0]
         details = cache.get((CacheType.LISTING_DETAILS.value, normalized))
@@ -772,7 +772,7 @@ def create_app(
     # ------------------------------------------------------------------
     @app.get("/api/route")
     def route_estimate(to: str, _: str = Depends(require_session)) -> Dict[str, Any]:
-        import requests as _requests
+        import requests as _requests  # type: ignore
 
         from .activity import home_from_config
 

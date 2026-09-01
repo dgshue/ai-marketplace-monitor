@@ -218,6 +218,15 @@ with sync_playwright() as p:
     )
     check("no junk scrape artifacts rendered", not junk_hits, junk_hits)
 
+    # --- layout guards: the detail media must never blow the page wide ---
+    overflow = pg.evaluate(
+        "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+    )
+    check("no horizontal page overflow", overflow <= 1, f"{overflow}px")
+    if pg.query_selector("#dd-map"):
+        mw = pg.eval_on_selector("#dd-map", "e=>e.getBoundingClientRect().width")
+        check("map confined to media rail", mw <= 500, f"{mw:.0f}px")
+
     # --- media: photo snapshot, pickup map, drive time on a facebook row ---
     picked = pg.evaluate(
         """(() => {

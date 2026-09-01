@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List
+from typing import Any, Dict, Generator, List, Type
 
 from .facebook import FacebookMarketItemCommonConfig
 from .listing import Listing
@@ -83,11 +83,11 @@ class BrowserTileMarketplace(Marketplace):
     # -------------------------------------------------------------------
 
     @classmethod
-    def get_config(cls: type, **kwargs: Any) -> BrowserMarketplaceConfig:
+    def get_config(cls: Type["BrowserTileMarketplace"], **kwargs: Any) -> BrowserMarketplaceConfig:
         return BrowserMarketplaceConfig(**kwargs)
 
     @classmethod
-    def get_item_config(cls: type, **kwargs: Any) -> BrowserItemConfig:
+    def get_item_config(cls: Type["BrowserTileMarketplace"], **kwargs: Any) -> BrowserItemConfig:
         return BrowserItemConfig(**kwargs)
 
     def _fetch_tiles(self: "BrowserTileMarketplace", url: str) -> List[Dict[str, Any]] | None:

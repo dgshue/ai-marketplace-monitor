@@ -260,7 +260,9 @@ def build_activity(
     user_flags = _collect_flags(local_cache)
 
     rows: List[Dict[str, Any]] = []
-    seen_hashes: Set[str] = set()
+    # Holds identity tuples for the new join and bare hash strings for the
+    # legacy fallback; both only ever answer membership.
+    seen_hashes: Set[Any] = set()
     # Item names to try when re-hashing a cached listing, each with the
     # threshold that applies to it.
     candidates: List[Tuple[str, int]] = sorted(per_item_threshold.items())
@@ -294,7 +296,7 @@ def build_activity(
             # Identity join first (cannot drift); hash reconstruction only for
             # ratings written before the by-listing mirror existed.
             rating = by_listing.get(ident)
-            listing_hash = ident
+            listing_hash: Any = ident
             if rating is None:
                 probe = (
                     listing

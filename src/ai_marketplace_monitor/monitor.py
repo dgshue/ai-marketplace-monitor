@@ -36,7 +36,9 @@ from .utils import (
 
 
 class MarketplaceMonitor:
-    active_marketplaces: ClassVar = {}
+    # Dict[str, Any] on purpose: values are heterogeneous backends, and the
+    # check-listing debug path duck-types Facebook-only methods on them.
+    active_marketplaces: ClassVar[Dict[str, Any]] = {}
 
     def __init__(
         self: "MarketplaceMonitor",
