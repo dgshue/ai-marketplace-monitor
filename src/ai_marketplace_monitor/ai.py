@@ -5,6 +5,7 @@ from enum import Enum
 from logging import Logger
 from typing import Any, ClassVar, Generic, Optional, Type, TypeVar
 
+import httpx
 from diskcache import Cache  # type: ignore
 from openai import OpenAI  # type: ignore
 from rich.pretty import pretty_repr
@@ -163,10 +164,22 @@ class GeminiConfig(OpenAIConfig):
 @dataclass
 class OllamaConfig(OpenAIConfig):
     api_key: str | None = field(default="ollama")  # required but not used.
+    # Context window (tokens) to request from Ollama. Ollama reloads the whole
+    # model whenever a request asks for a different num_ctx than the loaded
+    # runner has, so on a shared server every client should ask for the same
+    # value. The OpenAI-compatible /v1 endpoint cannot carry num_ctx, so when
+    # this is set the backend talks to Ollama's native /api/chat instead.
+    num_ctx: int | None = None
 
     def handle_base_url(self: "OllamaConfig") -> None:
         if self.base_url is None:
             raise ValueError("Ollama requires a string base_url.")
+
+    def handle_num_ctx(self: "OllamaConfig") -> None:
+        if self.num_ctx is None:
+            return
+        if not isinstance(self.num_ctx, int) or self.num_ctx <= 0:
+            raise ValueError("Ollama requires a positive integer num_ctx.")
 
     def handle_model(self: "OllamaConfig") -> None:
         if self.model is None:
@@ -295,6 +308,24 @@ class OpenAIBackend(AIBackend):
             if self.logger:
                 self.logger.info(f"""{hilight("[AI]", "name")} {self.config.name} connected.""")
 
+    SYSTEM_PROMPT: ClassVar[str] = (
+        "You are a helpful assistant that can confirm if a user's search criteria "
+        "matches the item he is interested in."
+    )
+
+    def _request_completion(self: "OpenAIBackend", prompt: str) -> tuple[str, Any]:
+        """Send one chat completion request; return (answer text, raw response)."""
+        assert self.client is not None
+        response = self.client.chat.completions.create(
+            model=self.config.model or self.default_model,
+            messages=[
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            stream=False,
+        )
+        return response.choices[0].message.content or "", response
+
     def evaluate(
         self: "OpenAIBackend",
         listing: Listing,
@@ -314,22 +345,14 @@ class OpenAIBackend(AIBackend):
 
         self.connect()
 
+        answer: str | None = None
+        response: Any = None
         retries = 0
         while retries < self.config.max_retries:
             self.connect()
             assert self.client is not None
             try:
-                response = self.client.chat.completions.create(
-                    model=self.config.model or self.default_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful assistant that can confirm if a user's search criteria matches the item he is interested in.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    stream=False,
-                )
+                answer, response = self._request_completion(prompt)
                 break
             except KeyboardInterrupt:
                 raise
@@ -343,11 +366,17 @@ class OpenAIBackend(AIBackend):
                 self.client = None
                 time.sleep(5)
 
+        if answer is None:
+            # every attempt raised; do not fall through to an unbound response
+            counter.increment(CounterItem.FAILED_AI_QUERY, item_config.name)
+            raise ValueError(
+                f"No response from {self.config.name} after {self.config.max_retries} attempts."
+            )
+
         # check if the response is yes
         if self.logger:
             self.logger.debug(f"""{hilight("[AI-Response]", "info")} {pretty_repr(response)}""")
 
-        answer = response.choices[0].message.content or ""
         if (
             answer is None
             or not answer.strip()
@@ -409,6 +438,38 @@ class OllamaBackend(OpenAIBackend):
     @classmethod
     def get_config(cls: Type["OllamaBackend"], **kwargs: Any) -> OllamaConfig:
         return OllamaConfig(**kwargs)
+
+    def _native_chat_url(self: "OllamaBackend") -> str:
+        """Map the OpenAI-compatible base_url (.../v1) to Ollama's native /api/chat."""
+        base = (self.config.base_url or "").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        return f"{base}/api/chat"
+
+    def _request_completion(self: "OllamaBackend", prompt: str) -> tuple[str, Any]:
+        num_ctx = getattr(self.config, "num_ctx", None)
+        if num_ctx is None:
+            return super()._request_completion(prompt)
+        # Ollama's OpenAI-compatible endpoint drops `options`, so num_ctx can
+        # only be pinned through the native API. Retries are handled by the
+        # caller's loop, so a single attempt per call is intended here.
+        timeout = self.config.timeout if self.config.timeout is not None else 600.0
+        res = httpx.post(
+            self._native_chat_url(),
+            json={
+                "model": self.config.model or self.default_model,
+                "messages": [
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+                "options": {"num_ctx": num_ctx},
+            },
+            timeout=timeout,
+        )
+        res.raise_for_status()
+        data = res.json()
+        return (data.get("message") or {}).get("content") or "", data
 
 
 class AnthropicBackend(AIBackend):

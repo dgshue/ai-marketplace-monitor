@@ -1,4 +1,5 @@
 import os
+import socket
 import sys
 import threading
 import time
@@ -107,6 +108,41 @@ class MarketplaceMonitor:
                 doze(60, self.config_files, self.keyboard_monitor)
                 continue
 
+    def _clear_stale_profile_lock(self: "MarketplaceMonitor", profile_dir: Path) -> None:
+        """Remove a Chromium profile lock left behind by a previous container.
+
+        Chromium records its lock as a symlink ``SingletonLock -> <hostname>-<pid>``.
+        It only reclaims the lock itself when the hostname matches and the pid
+        is dead; when the hostname differs it assumes another computer owns the
+        profile and refuses to start (exit code 21), which made the monitor fall
+        back to an ephemeral browser after every container recreation. Inside a
+        container the hostname changes on each recreate, so a lock naming a
+        different hostname can only be stale: nothing else mounts this profile.
+        """
+        lock = profile_dir / "SingletonLock"
+        if not lock.is_symlink():
+            return
+        try:
+            target = os.readlink(lock)
+        except OSError:
+            return
+        host, _, pid = target.rpartition("-")
+        if host == socket.gethostname():
+            # Same host: let Chromium decide (it checks whether the pid is alive).
+            return
+        if self.logger:
+            self.logger.warning(
+                f"""{hilight("[Browser]", "fail")} Clearing stale profile lock {hilight(target)} (pid {pid} on another host) from {hilight(str(profile_dir))}."""
+            )
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            try:
+                (profile_dir / name).unlink(missing_ok=True)
+            except OSError as e:
+                if self.logger:
+                    self.logger.warning(
+                        f"""{hilight("[Browser]", "fail")} Could not remove {name}: {e}"""
+                    )
+
     def _launch_browser(self: "MarketplaceMonitor") -> Browser:
         """Launch a browser, preferring a persistent Chromium profile.
 
@@ -124,6 +160,7 @@ class MarketplaceMonitor:
         """
         if os.environ.get("AIMM_EPHEMERAL_BROWSER") != "1":
             profile_dir = amm_home / "browser-profile"
+            self._clear_stale_profile_lock(profile_dir)
             try:
                 context = self.playwright.chromium.launch_persistent_context(
                     user_data_dir=str(profile_dir),
