@@ -857,7 +857,7 @@ with sync_playwright() as p:
           if (!A) return { missing: true };
           const now = 1000;
           const info = { available: true, blocked: { facebook: {
-            marketplace: "facebook", reason: 'page title "You're Temporarily Blocked"',
+            marketplace: "facebook", reason: "page title: Temporarily Blocked",
             detected_at: 0, until: 1000 + 3600, remaining: 3600, strikes: 2 } } };
           const stale = { available: true, blocked: { facebook: {
             marketplace: "facebook", reason: "old", detected_at: 0, until: 500 } } };
