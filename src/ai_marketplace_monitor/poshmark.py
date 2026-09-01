@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict
 from urllib.parse import quote
 
-from .browser_market import BrowserTileMarketplace
+from .browser_market import BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
 
 
@@ -51,7 +51,9 @@ class PoshmarkMarketplace(BrowserTileMarketplace):
     })()
     """
 
-    def search_url(self: "PoshmarkMarketplace", phrase: str) -> str:
+    def search_url(
+        self: "PoshmarkMarketplace", phrase: str, item_config: BrowserItemConfig
+    ) -> str:
         return f"https://poshmark.com/search?query={quote(phrase)}&type=listings"
 
     def tile_to_listing(self: "PoshmarkMarketplace", tile: Dict[str, Any]) -> Listing | None:

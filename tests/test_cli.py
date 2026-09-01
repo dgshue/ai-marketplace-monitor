@@ -282,6 +282,7 @@ def test_config(config_file: Callable, config_content: str, acceptable: bool) ->
         "max_search_interval": (int, type(None)),
         "market_type": (str, type(None)),
         "min_price": (str, type(None)),
+        "mode": (str, type(None)),
         "model": (str, type(None)),
         "monitor_config": dict,
         "name": (str, type(None)),

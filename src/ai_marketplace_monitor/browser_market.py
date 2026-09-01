@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Type
+from typing import Any, Dict, Generator, List, Tuple, Type
 
 from .facebook import FacebookMarketItemCommonConfig
 from .listing import Listing
@@ -29,8 +29,8 @@ from .utils import CounterItem, counter, hilight
 
 NAV_TIMEOUT_MS = 25_000
 TILE_WAIT_MS = 8_000
-# One reload on a soft failure; a hard block (Cloudflare interstitial) is not
-# retried — the next scheduled pass gets a fresh chance.
+# One reload on a soft failure. A hard block is only retried by backends that
+# set block_retry_delay; otherwise the next scheduled pass gets a fresh chance.
 SOFT_RETRIES = 1
 
 _PRICE_NUM = re.compile(r"(\d[\d,]*(?:\.\d+)?)")
@@ -73,8 +73,29 @@ class BrowserTileMarketplace(Marketplace):
     display_name = ""
     anchor_selector = ""  # e.g. 'a[href*="/products/"]'
     extract_js = ""  # page-side extraction, returns a list of tile dicts
+    # Lower-cased fragments of <title> that mean "we were served an
+    # interstitial, not results". Subclasses extend rather than replace, so a
+    # site-specific block page (eBay's "Pardon our interruption") is still
+    # recognised alongside the generic Cloudflare ones.
+    block_title_markers: Tuple[str, ...] = (
+        "just a moment",
+        "forbidden",
+        "access denied",
+        "attention required",
+    )
+    # Seconds to wait before each search page after the first. Sites that
+    # throttle bursts (measured on eBay: several back-to-back loads from one IP
+    # get an interstitial, the same URL a minute later does not) set this so a
+    # multi-phrase item does not look like a scrape.
+    phrase_delay = 0.0
+    # Seconds to wait before re-trying a page that came back as a block. Zero
+    # means "give up for this pass", which is right for a Cloudflare challenge
+    # that will not clear on its own.
+    block_retry_delay = 0.0
 
-    def search_url(self: "BrowserTileMarketplace", phrase: str) -> str:
+    def search_url(
+        self: "BrowserTileMarketplace", phrase: str, item_config: "BrowserItemConfig"
+    ) -> str:
         raise NotImplementedError
 
     def tile_to_listing(self: "BrowserTileMarketplace", tile: Dict[str, Any]) -> Listing | None:
@@ -96,7 +117,19 @@ class BrowserTileMarketplace(Marketplace):
             try:
                 self.page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
                 title = self.page.title() or ""
-                if "Just a moment" in title or "Forbidden" in title or "Access denied" in title:
+                lowered = title.lower()
+                if any(marker in lowered for marker in self.block_title_markers):
+                    if attempt < SOFT_RETRIES and self.block_retry_delay:
+                        # A burst-throttle interstitial clears on its own; the
+                        # identical URL succeeds after a pause. Worth one wait
+                        # rather than losing the phrase for a whole cycle.
+                        if self.logger:
+                            self.logger.debug(
+                                f"{self.display_name} served {title!r}; "
+                                f"retrying in {self.block_retry_delay:g}s."
+                            )
+                        time.sleep(self.block_retry_delay)
+                        continue
                     if self.logger:
                         self.logger.warning(
                             f"""{hilight("[Search]", "fail")} {self.display_name} blocked this pass ({title!r}); will try again next cycle."""
@@ -131,12 +164,14 @@ class BrowserTileMarketplace(Marketplace):
         low = price_number(item_config.min_price or config.min_price)
         high = price_number(item_config.max_price or config.max_price)
 
-        for phrase in item_config.search_phrases or []:
+        for index, phrase in enumerate(item_config.search_phrases or []):
+            if index and self.phrase_delay:
+                time.sleep(self.phrase_delay)
             if self.logger:
                 self.logger.info(
                     f"""{hilight("[Search]", "info")} Searching {self.display_name} for {hilight(phrase)}"""
                 )
-            tiles = self._fetch_tiles(self.search_url(phrase))
+            tiles = self._fetch_tiles(self.search_url(phrase, item_config))
             if tiles is None:
                 continue
             counter.increment(CounterItem.SEARCH_PERFORMED, item_config.name)

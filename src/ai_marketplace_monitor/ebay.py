@@ -1,18 +1,21 @@
-"""eBay marketplace backend, built on the official Browse API.
+"""eBay backend, with two interchangeable ways to search.
 
-Deliberately not a scraper. eBay publishes a documented REST API for exactly
-this, free, with OAuth2 client-credentials auth and roughly 5,000 calls/day at
-the application level (raisable through eBay's free Application Growth Check).
-Against that, browser automation would be slower, more fragile, and against
-eBay's terms -- there is no upside.
+`mode = "api"` talks to eBay's official Browse API: fast, richer (seller,
+condition, description, exact item location), roughly 5,000 calls/day, and it
+needs no browser at all. The price is a developer account -- an application key
+set from https://developer.ebay.com -- which is a real barrier for someone who
+just wants deal alerts.
 
-That makes this the first backend needing no browser at all: `requires_browser`
-is False and `search()` never touches `self.browser`. The Listing objects it
-yields are indistinguishable from the Facebook ones, so AI evaluation, rating
-thresholds, notification, caching and de-duplication all work unchanged.
+`mode = "browser"` scrapes the ordinary ebay.com search page in the same headed
+Chromium the Depop and Poshmark backends already use. No account, no keys, no
+OAuth; the trade is fewer fields (no seller, no description) and the usual
+fragility of markup that changes without notice.
 
-Credentials come from https://developer.ebay.com (create an application key
-set). Keep them out of config.toml with ${EBAY_CLIENT_ID} / ${EBAY_CLIENT_SECRET}.
+Neither is written into the config by default. `mode` left unset resolves to
+"api" when both credentials are present and "browser" otherwise, so eBay works
+out of the box and silently upgrades itself the moment keys appear.
+
+Keep credentials out of config.toml with ${EBAY_CLIENT_ID} / ${EBAY_CLIENT_SECRET}.
 """
 
 from __future__ import annotations
@@ -21,13 +24,14 @@ import base64
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Type
+from typing import Any, Dict, Generator, List, Tuple, Type
+from urllib.parse import urlencode
 
 import requests  # type: ignore
 
-from .facebook import FacebookMarketItemCommonConfig
+from .browser_market import BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
-from .marketplace import ItemConfig, Marketplace, MarketplaceConfig
+from .marketplace import Marketplace, MarketplaceConfig
 from .utils import CounterItem, counter, hilight
 
 # Production endpoints. The sandbox equivalents return synthetic inventory that
@@ -46,6 +50,82 @@ MAX_LIMIT = 200
 TOKEN_EXPIRY_MARGIN = 60
 
 VALID_BUYING_OPTIONS = {"FIXED_PRICE", "AUCTION", "BEST_OFFER", "CLASSIFIED_AD"}
+
+# How a search is performed. "api" needs credentials; "browser" needs the
+# shared Chromium and nothing else.
+VALID_MODES = ("api", "browser")
+
+# ---------------------------------------------------------------------------
+# Browser mode
+#
+# Selectors were verified against a live ebay.com search on 2026-09-01 (headed
+# Chromium in this app's own container: 62 `li.s-card` tiles for "gopro hero
+# 11", zero `li.s-item`) and cross-checked against scraper-bank's Playwright
+# eBay search scraper, regenerated 2026-01-17:
+#   github.com/scraper-bank/eBay.com-Scrapers
+#   node/playwright/product_search/scraper/ebay.com_scraper_product_search_v1.js
+# It keys off `ul.srp-results li.s-card` and reads `.s-card__title`,
+# `.s-card__price`, `img.s-card__image` and `a.s-card__link`. eBay replaced the
+# older `li.s-item` markup with `li.s-card` during 2025 but still serves the old
+# one in places, so both are matched -- the same dual-layout handling every
+# current scraper has converged on.
+#
+# secondhand-mcp, the reference the Depop and Poshmark backends were ported
+# from, deliberately has no eBay scraper: its ebay.ts calls the Browse API,
+# which is what this file's API mode already does.
+# ---------------------------------------------------------------------------
+BROWSER_SEARCH_HOSTS = {
+    "EBAY_US": "www.ebay.com",
+    "EBAY_GB": "www.ebay.co.uk",
+    "EBAY_CA": "www.ebay.ca",
+    "EBAY_DE": "www.ebay.de",
+    "EBAY_AU": "www.ebay.com.au",
+}
+DEFAULT_BROWSER_HOST = "www.ebay.com"
+
+# _sop=10 is "Time: newly listed". A monitor wants what appeared since the last
+# pass, not eBay's relevance ranking -- the same choice API mode makes with
+# sort=newlyListed.
+SORT_NEWLY_LISTED = "10"
+# Largest page size the search UI offers (the default is 60). One page per
+# phrase per pass is plenty for a newest-first monitor.
+ITEMS_PER_PAGE = "240"
+
+# LH_ItemCondition ids, from eBay's own condition-id table:
+# https://developer.ebay.com/api-docs/sell/static/metadata/condition-id-values.html
+# Keys are the vocabulary users already write for Facebook, so one `condition`
+# line works across backends.
+BROWSER_CONDITION_IDS = {
+    "new": "1000",
+    "open_box": "1500",
+    "refurbished": "2000",
+    "certified_refurbished": "2000",
+    "seller_refurbished": "2500",
+    "used_like_new": "2750",
+    "used": "3000",
+    "used_good": "3000",
+    "used_fair": "3000",
+    "for_parts": "7000",
+}
+
+# Every eBay search page opens with a house-ad card that looks exactly like a
+# listing but points at /itm/123456 and is titled "Shop on eBay".
+HOUSE_AD_ITEM_ID = "123456"
+
+# Tiles prefix new listings with a "NEW LISTING" flag and append a screen-reader
+# hint to the link text; neither belongs in the title the AI reads.
+_TITLE_PREFIX = re.compile(r"^(?:new listing|sponsored)\s*", re.IGNORECASE)
+_TITLE_SUFFIX = re.compile(r"\s*opens in a new window or tab\s*$", re.IGNORECASE)
+# "Located in United States" (s-card) / "from United States" (s-item).
+_LOCATION_ROW = re.compile(r"^(?:located in|from)\s+(.+)$", re.IGNORECASE)
+# A tile can carry two subtitles: eBay's condition vocabulary and the seller's
+# own free-text note ("*NO Battery or SD Card* | Missing Lens"). Only the first
+# kind is a condition, so match the vocabulary rather than taking subtitle[0].
+_CONDITION_ROW = re.compile(
+    r"^(?:brand new|new|open box|pre-owned|certified|refurbished|used|"
+    r"parts only|for parts|like new|very good|good|acceptable)\b",
+    re.IGNORECASE,
+)
 
 # Browse returns eBay's condition vocabulary; these are the values a user is
 # likely to write in config.
@@ -71,7 +151,7 @@ def _numeric_price(value: str | None) -> str | None:
 
 
 @dataclass
-class EbayItemConfig(ItemConfig, FacebookMarketItemCommonConfig):
+class EbayItemConfig(BrowserItemConfig):
     """Accepts the Facebook-specific item keys as well as the generic ones.
 
     An item that names no marketplace is searched everywhere, and config.py
@@ -81,6 +161,10 @@ class EbayItemConfig(ItemConfig, FacebookMarketItemCommonConfig):
     search reads. Sharing the field set makes the object usable by either
     backend regardless of iteration order; eBay maps `condition` and ignores
     the rest.
+
+    Deriving from BrowserItemConfig (itself ItemConfig + the Facebook mixin,
+    so the field set is unchanged) rather than repeating those bases is what
+    lets browser mode hand the very same object to the tile scraper.
     """
 
 
@@ -92,6 +176,8 @@ class EbayMarketplaceConfig(MarketplaceConfig):
     search_interval, rating, notify, keywords, prices.
     """
 
+    # "api", "browser", or unset -- see resolved_mode.
+    mode: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
     # Which eBay site to search. EBAY_US, EBAY_GB, EBAY_DE, ...
@@ -99,6 +185,34 @@ class EbayMarketplaceConfig(MarketplaceConfig):
     # Restrict to items that will actually ship to you.
     delivery_country: str | None = None
     buying_options: List[str] | None = None
+
+    def handle_mode(self: "EbayMarketplaceConfig") -> None:
+        if self.mode is None:
+            return
+        if not isinstance(self.mode, str):
+            raise ValueError(f"Marketplace {hilight(self.name)} mode must be a string.")
+        # Same "unset arrives as empty string" story as the credentials below:
+        # a blank select in the web UI must mean "decide for me", not "invalid".
+        self.mode = self.mode.strip().lower() or None
+        if self.mode is not None and self.mode not in VALID_MODES:
+            raise ValueError(
+                f"Marketplace {hilight(self.name)} mode must be one of "
+                f"{', '.join(VALID_MODES)}, not {hilight(self.mode)}."
+            )
+
+    @property
+    def resolved_mode(self: "EbayMarketplaceConfig") -> str:
+        """Which backend actually runs.
+
+        An explicit `mode` always wins. Otherwise credentials decide: with a
+        key set the API is strictly better, and without one the scraper is the
+        only thing that can return anything at all. Resolving lazily (rather
+        than in handle_mode) keeps this independent of the order __post_init__
+        happens to run the field handlers in.
+        """
+        if self.mode:
+            return self.mode
+        return "api" if (self.client_id and self.client_secret) else "browser"
 
     def handle_client_id(self: "EbayMarketplaceConfig") -> None:
         if self.client_id is None:
@@ -109,7 +223,7 @@ class EbayMarketplaceConfig(MarketplaceConfig):
         # compose file passes EBAY_CLIENT_ID through unconditionally, so an
         # unset stack variable reaches ${EBAY_CLIENT_ID} as "". Rejecting that
         # at parse time made the whole config invalid before the user ever had
-        # credentials; treat it as absent and complain at search time instead.
+        # credentials; treat it as absent and fall back to browser mode.
         self.client_id = self.client_id.strip() or None
 
     def handle_client_secret(self: "EbayMarketplaceConfig") -> None:
@@ -155,11 +269,166 @@ class EbayMarketplaceConfig(MarketplaceConfig):
         return
 
 
+class EbayBrowserMarketplace(BrowserTileMarketplace):
+    """Search-page scraper for browser mode.
+
+    Never registered as a marketplace of its own: `[marketplace.ebay]` stays a
+    single section and a single registry entry, and EbayMarketplace drives this
+    object when its mode resolves to "browser". It therefore never builds its
+    own config -- the eBay config is handed to it by its owner.
+    """
+
+    display_name = "eBay"
+    anchor_selector = "li.s-card, li.s-item"
+    # eBay's bot wall renders as "Error Page | eBay" or "Pardon Our
+    # Interruption"; a headless launch reliably trips it, a headed one does not.
+    block_title_markers: Tuple[str, ...] = (
+        *BrowserTileMarketplace.block_title_markers,
+        "pardon our interruption",
+        "error page",
+        "security measure",
+        "are you a robot",
+    )
+    # Measured 2026-09-01: four ebay.com search loads inside a minute from one
+    # IP got the interstitial three times; the same URL a minute later returned
+    # 242 tiles. So pace the phrases and give one blocked page a second chance
+    # rather than dropping the phrase for the whole cycle.
+    phrase_delay = 6.0
+    block_retry_delay = 25.0
+
+    # Both layouts read the same way: find the /itm/ link, then pull the four
+    # fields that exist in either markup. Text is returned raw and parsed in
+    # tile_to_listing, which keeps the page-side half small and lets the messy
+    # half be unit-tested without a browser.
+    extract_js = """
+    (() => {
+      const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+      const seen = new Set();
+      const out = [];
+      document.querySelectorAll('li.s-card, li.s-item').forEach((li) => {
+        const a = li.querySelector('a.s-card__link, a.s-item__link, a[href*="/itm/"]');
+        if (!a) return;
+        const m = (a.getAttribute('href') || '').match(/\\/itm\\/(\\d+)/);
+        if (!m) return;
+        const id = m[1];
+        if (seen.has(id)) return;
+        seen.add(id);
+        const price = li.querySelector('.s-card__price, .s-item__price');
+        const title = li.querySelector('.s-card__title, .s-item__title');
+        const img = li.querySelector('img.s-card__image, img.s-item__image-img, img');
+        out.push({
+          id: id,
+          title: clean(title && title.innerText),
+          price: clean(price && price.innerText),
+          img: (img && (img.getAttribute('src') || img.getAttribute('data-src'))) || '',
+          subtitles: Array.from(
+            li.querySelectorAll('.s-card__subtitle, .s-item__subtitle, .SECONDARY_INFO')
+          ).map((e) => clean(e.innerText)),
+          attrs: Array.from(
+            li.querySelectorAll(
+              '.s-card__attribute-row, .s-item__location, .s-item__itemLocation'
+            )
+          ).map((e) => clean(e.innerText)),
+        });
+      });
+      return out;
+    })()
+    """
+
+    def _host(self: "EbayBrowserMarketplace") -> str:
+        config: EbayMarketplaceConfig = self.config  # type: ignore[assignment]
+        return BROWSER_SEARCH_HOSTS.get(config.marketplace_id or "EBAY_US", DEFAULT_BROWSER_HOST)
+
+    def search_url(
+        self: "EbayBrowserMarketplace", phrase: str, item_config: BrowserItemConfig
+    ) -> str:
+        config: EbayMarketplaceConfig = self.config  # type: ignore[assignment]
+        params: Dict[str, str] = {
+            "_nkw": phrase,
+            "_sop": SORT_NEWLY_LISTED,
+            "_ipg": ITEMS_PER_PAGE,
+        }
+        # Pushing the bounds into the URL is not just politeness: one page is
+        # all we fetch, so an unfiltered page of 240 can be entirely out of
+        # range. BrowserTileMarketplace still re-checks every price it gets
+        # back, because eBay applies _udlo/_udhi to the item price and ignores
+        # shipping.
+        low = _numeric_price(item_config.min_price or config.min_price)
+        high = _numeric_price(item_config.max_price or config.max_price)
+        if low:
+            params["_udlo"] = low
+        if high:
+            params["_udhi"] = high
+
+        # `condition` lives on the Facebook config classes, so read it
+        # defensively -- the item may have been built by another backend.
+        conditions = getattr(item_config, "condition", None) or getattr(config, "condition", None)
+        if conditions:
+            ids = sorted(
+                {
+                    BROWSER_CONDITION_IDS[str(c).lower()]
+                    for c in conditions
+                    if str(c).lower() in BROWSER_CONDITION_IDS
+                }
+            )
+            if ids:
+                # eBay takes several condition ids pipe-separated.
+                params["LH_ItemCondition"] = "|".join(ids)
+
+        return f"https://{self._host()}/sch/i.html?{urlencode(params)}"
+
+    def tile_to_listing(self: "EbayBrowserMarketplace", tile: Dict[str, Any]) -> Listing | None:
+        item_id = str(tile.get("id") or "").strip()
+        if not item_id or item_id == HOUSE_AD_ITEM_ID:
+            return None
+
+        title = str(tile.get("title") or "").strip()
+        title = _TITLE_SUFFIX.sub("", _TITLE_PREFIX.sub("", title)).strip()
+        if not title or title.lower() == "shop on ebay":
+            return None
+
+        condition = ""
+        for subtitle in tile.get("subtitles") or []:
+            text = str(subtitle).strip()
+            if text and _CONDITION_ROW.match(text):
+                condition = text
+                break
+
+        location = ""
+        for attr in tile.get("attrs") or []:
+            match = _LOCATION_ROW.match(str(attr).strip())
+            if match:
+                location = match.group(1).strip()
+                break
+
+        return Listing(
+            marketplace="ebay",
+            # Left empty to match every other backend: the item name is
+            # attached later, and the cache key depends on this being uniform.
+            name="",
+            id=item_id,
+            title=title,
+            image=str(tile.get("img") or ""),
+            price=str(tile.get("price") or "").strip(),
+            # The href on the tile carries a page-sized tracking query string
+            # that changes on every load; the canonical form is stable and is
+            # what the cache and the de-duplicator key on.
+            post_url=f"https://{self._host()}/itm/{item_id}",
+            location=location,
+            # Search tiles carry neither, and saying so beats inventing it.
+            seller="",
+            condition=condition,
+            description="",
+        )
+
+
 class EbayMarketplace(Marketplace):
-    # No browser, no login, no 2FA. The whole reason to prefer the API.
-    requires_browser = False
-    # Browse searches the whole catalogue; location is a delivery filter, not
-    # an origin, so demanding a search_city here would be meaningless.
+    # The class-level worst case. Which of the two backends actually runs is a
+    # per-instance question -- see needs_browser().
+    requires_browser = True
+    # Browse searches the whole catalogue and the search page ships nationwide;
+    # location is a delivery filter, not an origin, so demanding a search_city
+    # here would be meaningless in either mode.
     requires_search_city = False
 
     def __init__(
@@ -172,6 +441,9 @@ class EbayMarketplace(Marketplace):
         super().__init__(name, browser, keyboard_monitor, logger)
         self._token: str | None = None
         self._token_expires_at: float = 0.0
+        # Built on first use in browser mode, so an API-mode user never pays
+        # for a second Marketplace object.
+        self._scraper: EbayBrowserMarketplace | None = None
 
     @classmethod
     def get_config(cls: Type["EbayMarketplace"], **kwargs: Any) -> EbayMarketplaceConfig:
@@ -180,6 +452,39 @@ class EbayMarketplace(Marketplace):
     @classmethod
     def get_item_config(cls: Type["EbayMarketplace"], **kwargs: Any) -> EbayItemConfig:
         return EbayItemConfig(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Mode
+    # ------------------------------------------------------------------
+
+    @property
+    def mode(self: "EbayMarketplace") -> str:
+        config: EbayMarketplaceConfig | None = getattr(self, "config", None)
+        # Unconfigured instances exist briefly between construction and
+        # configure(); browser mode is the answer that needs no credentials.
+        return "browser" if config is None else config.resolved_mode
+
+    def needs_browser(self: "EbayMarketplace") -> bool:
+        return self.mode == "browser"
+
+    def _browser_backend(self: "EbayMarketplace") -> EbayBrowserMarketplace:
+        if self._scraper is None:
+            self._scraper = EbayBrowserMarketplace(
+                self.name, self.browser, self.keyboard_monitor, self.logger
+            )
+        self._scraper.set_browser(self.browser)
+        self._scraper.configure(self.config, self.translator)
+        return self._scraper
+
+    def set_browser(self: "EbayMarketplace", browser: Any = None) -> None:
+        super().set_browser(browser)
+        if self._scraper is not None:
+            self._scraper.set_browser(browser)
+
+    def stop(self: "EbayMarketplace") -> None:
+        if self._scraper is not None:
+            self._scraper.stop()
+        super().stop()
 
     # ------------------------------------------------------------------
     # Auth
@@ -199,8 +504,9 @@ class EbayMarketplace(Marketplace):
         config: EbayMarketplaceConfig = self.config  # type: ignore[assignment]
         if not config.client_id or not config.client_secret:
             raise ValueError(
-                f"Marketplace {hilight(self.name)} needs client_id and client_secret. "
-                "Create an application key set at https://developer.ebay.com."
+                f'Marketplace {hilight(self.name)} is set to mode = "api", which needs '
+                "client_id and client_secret from an application key set at "
+                'https://developer.ebay.com. Set mode = "browser" to search without one.'
             )
 
         basic = base64.b64encode(f"{config.client_id}:{config.client_secret}".encode()).decode()
@@ -300,12 +606,30 @@ class EbayMarketplace(Marketplace):
     def search(
         self: "EbayMarketplace", item_config: EbayItemConfig
     ) -> Generator[Listing, None, None]:
+        if self.mode == "browser":
+            if self.browser is None:
+                # Only reachable if a caller decided no browser was needed;
+                # never take the monitor loop down over it.
+                if self.logger:
+                    self.logger.error(
+                        f"""{hilight("[Search]", "fail")} eBay is in browser mode but no browser """
+                        """is running; skipping this pass."""
+                    )
+                return
+            yield from self._browser_backend().search(item_config)
+            return
+
+        yield from self._search_api(item_config)
+
+    def _search_api(
+        self: "EbayMarketplace", item_config: EbayItemConfig
+    ) -> Generator[Listing, None, None]:
         config: EbayMarketplaceConfig = self.config  # type: ignore[assignment]
         try:
             token = self._access_token()
         except ValueError as e:
             # Missing/invalid credentials must not take the monitor loop down;
-            # an enabled-but-unconfigured eBay section logs and skips the pass.
+            # an api-mode section without keys logs and skips the pass.
             if self.logger:
                 self.logger.error(f"""{hilight("[Search]", "fail")} {e}""")
             return
