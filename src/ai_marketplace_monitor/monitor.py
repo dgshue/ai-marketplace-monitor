@@ -303,6 +303,43 @@ class MarketplaceMonitor:
             self.web_paused.clear()
         self._persist_state()
 
+    def _pass_interrupted(
+        self: "MarketplaceMonitor",
+        marketplace_config: TMarketplaceConfig,
+        item_config: TItemConfig,
+        rated: int,
+    ) -> bool:
+        """Whether an in-flight pass should stop before the next AI rating.
+
+        Checking only at the top of search_item made Pause a lie: a pass that
+        was already iterating a few hundred listings kept calling the AI for
+        hours (~25s each on a local Ollama) after the button was pressed, and
+        a marketplace that blocked us mid-pass kept being hammered. Both are
+        cheap to re-read, and the natural place to act on them is the moment
+        before the next expensive call.
+        """
+        if self.web_paused.is_set():
+            if self.logger:
+                self.logger.info(
+                    f"""{hilight("[Pause]", "info")} Paused mid-search — stopping the """
+                    f"""{hilight(item_config.name)} pass on """
+                    f"""{hilight(marketplace_config.name)} after {rated} """
+                    f"""{"rating" if rated == 1 else "ratings"}."""
+                )
+            return True
+        blocked = self.block_tracker.active(marketplace_config.name)
+        if blocked is not None:
+            if self.logger:
+                self.logger.info(
+                    f"""{hilight("[Blocked]", "fail")} {hilight(marketplace_config.name)} """
+                    f"""blocked us mid-search — stopping the {hilight(item_config.name)} """
+                    f"""pass after {rated} """
+                    f"""{"rating" if rated == 1 else "ratings"}; retrying in """
+                    f"""{humanize.naturaldelta(blocked.remaining())}."""
+                )
+            return True
+        return False
+
     def search_item(
         self: "MarketplaceMonitor",
         marketplace_config: TMarketplaceConfig,
@@ -445,6 +482,7 @@ class MarketplaceMonitor:
         users_to_notify = (
             item_config.notify or marketplace_config.notify or list(self.config.user.keys())
         )
+        rated = 0
         for listing in marketplace.search(item_config):
             # duplicated ID should not happen, but sellers could repost the same listing,
             # potentially under different seller names
@@ -472,10 +510,19 @@ class MarketplaceMonitor:
                         ),
                     )
                 continue
+            # Pause and block are re-read before every AI call, which is the
+            # only place in this loop that costs real time.
+            if self._pass_interrupted(marketplace_config, item_config, rated):
+                # Saving the session on the way out is the same courtesy the
+                # end of a normal pass extends; the listings gathered so far
+                # are simply dropped, and the next pass re-rates them.
+                marketplace.save_browser_state()
+                return
             # for x in self.find_new_items(found_items)
             res = self.evaluate_by_ai(
                 listing, item_config=item_config, marketplace_config=marketplace_config
             )
+            rated += 1
             if self.logger:
                 if res.comment == AIResponse.NOT_EVALUATED:
                     if res.name:
@@ -920,6 +967,7 @@ class MarketplaceMonitor:
             raise ValueError("No URLs to check.")
 
         # Open a new browser page.
+        checked = 0
         for post_url in post_urls or []:
             # check if item in config
             assert self.config is not None
@@ -988,9 +1036,13 @@ class MarketplaceMonitor:
                         f"""{hilight("[Search]", "succ")} Checking {post_url} for item {item_config.name} with configuration {pretty_repr(item_config)}"""
                     )
                 marketplace.check_listing(listing, item_config)
+                if self._pass_interrupted(marketplace_config, item_config, checked):
+                    marketplace.save_browser_state()
+                    return
                 rating = self.evaluate_by_ai(
                     listing, item_config=item_config, marketplace_config=marketplace_config
                 )
+                checked += 1
                 if self.logger:
                     if rating.comment == AIResponse.NOT_EVALUATED:
                         if rating.name:

@@ -33,6 +33,15 @@ TILE_WAIT_MS = 8_000
 # set block_retry_delay; otherwise the next scheduled pass gets a fresh chance.
 SOFT_RETRIES = 1
 
+# How many listings one search phrase may hand to the AI when the config says
+# nothing. These backends return a whole search page at once -- eBay serves up
+# to 240 tiles per phrase -- and every tile costs a full AI rating, about 25s
+# against a local Ollama. Four phrases x 240 tiles is a five-hour pass, which
+# is what a `car` item actually did. 60 is eBay's own default page size and
+# about 25 minutes of rating per phrase: enough to see everything new on a
+# newest-first search, bounded enough that a pass finishes.
+DEFAULT_MAX_LISTINGS = 60
+
 _PRICE_NUM = re.compile(r"(\d[\d,]*(?:\.\d+)?)")
 
 
@@ -163,6 +172,8 @@ class BrowserTileMarketplace(Marketplace):
         config = self.config
         low = price_number(item_config.min_price or config.min_price)
         high = price_number(item_config.max_price or config.max_price)
+        # Item beats marketplace beats the built-in default.
+        max_listings = item_config.max_listings or config.max_listings or DEFAULT_MAX_LISTINGS
 
         for index, phrase in enumerate(item_config.search_phrases or []):
             if index and self.phrase_delay:
@@ -175,6 +186,7 @@ class BrowserTileMarketplace(Marketplace):
             if tiles is None:
                 continue
             counter.increment(CounterItem.SEARCH_PERFORMED, item_config.name)
+            yielded = 0
             for tile in tiles:
                 listing = self.tile_to_listing(tile)
                 if listing is None:
@@ -190,3 +202,12 @@ class BrowserTileMarketplace(Marketplace):
                         continue
                 counter.increment(CounterItem.LISTING_EXAMINED, item_config.name)
                 yield listing
+                yielded += 1
+                if yielded >= max_listings:
+                    if self.logger:
+                        self.logger.info(
+                            f"""{hilight("[Search]", "info")} Stopping at the """
+                            f"""{max_listings}-listing cap for {hilight(phrase)} on """
+                            f"""{self.display_name}; raise max_listings to see more."""
+                        )
+                    break

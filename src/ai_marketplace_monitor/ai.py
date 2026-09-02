@@ -11,7 +11,7 @@ from openai import OpenAI  # type: ignore
 from rich.pretty import pretty_repr
 
 from .listing import Listing
-from .marketplace import TItemConfig, TMarketplaceConfig
+from .marketplace import TItemConfig, TMarketplaceConfig, marketplace_display_name
 from .utils import BaseConfig, CacheType, CounterItem, cache, counter, hilight
 
 
@@ -215,9 +215,16 @@ class AIBackend(Generic[TAIConfig]):
         item_config: TItemConfig,
         marketplace_config: TMarketplaceConfig,
     ) -> str:
+        # Name the source the listing actually came from. Hard-coding Facebook
+        # here told the model every eBay/Depop/Poshmark listing was on the wrong
+        # platform, and it duly rated them 1 "because it is on eBay, not
+        # Facebook Marketplace". An unknown source is left unnamed rather than
+        # guessed -- see marketplace_display_name.
+        source = marketplace_display_name(getattr(listing, "marketplace", None))
         prompt = (
-            f"""A user wants to buy a {item_config.name} from Facebook Marketplace. """
-            f"""Search phrases: "{'" and "'.join(item_config.search_phrases)}", """
+            f"""A user wants to buy a {item_config.name}"""
+            + (f""" from {source}""" if source else "")
+            + f""". Search phrases: "{'" and "'.join(item_config.search_phrases)}", """
         )
         if item_config.description:
             prompt += f"""Description: "{item_config.description}", """

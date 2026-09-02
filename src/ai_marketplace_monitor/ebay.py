@@ -29,9 +29,9 @@ from urllib.parse import urlencode
 
 import requests  # type: ignore
 
-from .browser_market import BrowserItemConfig, BrowserTileMarketplace
+from .browser_market import DEFAULT_MAX_LISTINGS, BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
-from .marketplace import Marketplace, MarketplaceConfig
+from .marketplace import MARKETPLACE_DISPLAY_NAMES, MarketPlace, Marketplace, MarketplaceConfig
 from .utils import CounterItem, counter, hilight
 
 # Production endpoints. The sandbox equivalents return synthetic inventory that
@@ -87,9 +87,19 @@ DEFAULT_BROWSER_HOST = "www.ebay.com"
 # pass, not eBay's relevance ranking -- the same choice API mode makes with
 # sort=newlyListed.
 SORT_NEWLY_LISTED = "10"
-# Largest page size the search UI offers (the default is 60). One page per
-# phrase per pass is plenty for a newest-first monitor.
-ITEMS_PER_PAGE = "240"
+# Page sizes the search UI offers, smallest first. One page per phrase per pass
+# is plenty for a newest-first monitor; asking for 240 tiles when the cap is 60
+# just downloads 180 tiles to throw away.
+ITEMS_PER_PAGE_CHOICES = (60, 120, 240)
+
+
+def _items_per_page(max_listings: int) -> str:
+    """Smallest offered page size that still covers the cap."""
+    for size in ITEMS_PER_PAGE_CHOICES:
+        if max_listings <= size:
+            return str(size)
+    return str(ITEMS_PER_PAGE_CHOICES[-1])
+
 
 # LH_ItemCondition ids, from eBay's own condition-id table:
 # https://developer.ebay.com/api-docs/sell/static/metadata/condition-id-values.html
@@ -185,6 +195,14 @@ class EbayMarketplaceConfig(MarketplaceConfig):
     # Restrict to items that will actually ship to you.
     delivery_country: str | None = None
     buying_options: List[str] | None = None
+    # eBay category id, e.g. 6001 for Cars & Trucks. Narrows a search that a
+    # phrase alone cannot: "toyota" matches a whole catalogue of floor mats
+    # before it matches a car. Declared here rather than on the item config
+    # because `category` already exists there as Facebook's own vocabulary
+    # (FacebookMarketItemCommonConfig.handle_category), and an eBay numeric id
+    # would fail that validator. Browser mode passes it as _sacat, API mode as
+    # category_ids.
+    category: str | None = None
 
     def handle_mode(self: "EbayMarketplaceConfig") -> None:
         if self.mode is None:
@@ -242,6 +260,26 @@ class EbayMarketplaceConfig(MarketplaceConfig):
                 f"Marketplace {hilight(self.name)} marketplace_id must look like 'EBAY_US'."
             )
 
+    def handle_category(self: "EbayMarketplaceConfig") -> None:
+        if self.category is None:
+            return
+        # TOML gives an int for `category = 6001`; both spellings mean the
+        # same id and both end up in a URL as a string.
+        if isinstance(self.category, bool) or not isinstance(self.category, (int, str)):
+            raise ValueError(
+                f"Marketplace {hilight(self.name)} category must be an eBay category id."
+            )
+        self.category = str(self.category).strip()
+        if not self.category:
+            self.category = None
+            return
+        if not self.category.isdigit():
+            raise ValueError(
+                f"Marketplace {hilight(self.name)} category must be a numeric eBay "
+                f"category id (e.g. 6001 for Cars & Trucks), not "
+                f"{hilight(self.category)}."
+            )
+
     def handle_delivery_country(self: "EbayMarketplaceConfig") -> None:
         if self.delivery_country is None:
             return
@@ -278,7 +316,7 @@ class EbayBrowserMarketplace(BrowserTileMarketplace):
     own config -- the eBay config is handed to it by its owner.
     """
 
-    display_name = "eBay"
+    display_name = MARKETPLACE_DISPLAY_NAMES[MarketPlace.EBAY.value]
     anchor_selector = "li.s-card, li.s-item"
     # eBay's bot wall renders as "Error Page | eBay" or "Pardon Our
     # Interruption"; a headless launch reliably trips it, a headed one does not.
@@ -343,11 +381,16 @@ class EbayBrowserMarketplace(BrowserTileMarketplace):
         self: "EbayBrowserMarketplace", phrase: str, item_config: BrowserItemConfig
     ) -> str:
         config: EbayMarketplaceConfig = self.config  # type: ignore[assignment]
+        max_listings = item_config.max_listings or config.max_listings or DEFAULT_MAX_LISTINGS
         params: Dict[str, str] = {
             "_nkw": phrase,
             "_sop": SORT_NEWLY_LISTED,
-            "_ipg": ITEMS_PER_PAGE,
+            "_ipg": _items_per_page(max_listings),
         }
+        if config.category:
+            # eBay's own category filter. Far cheaper than letting the AI
+            # reject 200 car parts one 25-second rating at a time.
+            params["_sacat"] = config.category
         # Pushing the bounds into the URL is not just politeness: one page is
         # all we fetch, so an unfiltered page of 240 can be entirely out of
         # range. BrowserTileMarketplace still re-checks every price it gets
@@ -423,6 +466,7 @@ class EbayBrowserMarketplace(BrowserTileMarketplace):
 
 
 class EbayMarketplace(Marketplace):
+    display_name = MARKETPLACE_DISPLAY_NAMES[MarketPlace.EBAY.value]
     # The class-level worst case. Which of the two backends actually runs is a
     # per-instance question -- see needs_browser().
     requires_browser = True
@@ -639,15 +683,23 @@ class EbayMarketplace(Marketplace):
             "Accept": "application/json",
         }
         filters = self._filters(item_config)
+        # An explicit cap is honored here too -- Browse takes a `limit`, so
+        # asking for fewer items is strictly cheaper than fetching 200 and
+        # throwing most away. Left unset the API keeps its old full page: it
+        # returns descriptions and sellers, so its ratings are worth more than
+        # a bare tile's, and it is not what burned five hours.
+        max_listings = item_config.max_listings or config.max_listings
 
         for phrase in item_config.search_phrases or []:
             params: Dict[str, Any] = {
                 "q": phrase,
-                "limit": MAX_LIMIT,
+                "limit": min(max_listings, MAX_LIMIT) if max_listings else MAX_LIMIT,
                 # Newest first: a monitor cares about what appeared since the
                 # last pass, not about eBay's relevance ranking.
                 "sort": "newlyListed",
             }
+            if config.category:
+                params["category_ids"] = config.category
             if filters:
                 params["filter"] = filters
 
@@ -686,9 +738,13 @@ class EbayMarketplace(Marketplace):
 
             summaries = response.json().get("itemSummaries") or []
             counter.increment(CounterItem.SEARCH_PERFORMED, item_config.name)
+            yielded = 0
             for summary in summaries:
                 listing = self._to_listing(summary)
                 if listing is None:
                     continue
                 counter.increment(CounterItem.LISTING_EXAMINED, item_config.name)
                 yield listing
+                yielded += 1
+                if max_listings and yielded >= max_listings:
+                    break

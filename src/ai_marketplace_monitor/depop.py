@@ -12,10 +12,11 @@ from urllib.parse import quote
 
 from .browser_market import BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
+from .marketplace import MARKETPLACE_DISPLAY_NAMES, MarketPlace
 
 
 class DepopMarketplace(BrowserTileMarketplace):
-    display_name = "Depop"
+    display_name = MARKETPLACE_DISPLAY_NAMES[MarketPlace.DEPOP.value]
     anchor_selector = 'a[href*="/products/"]'
 
     # Ported near-verbatim from secondhand-mcp's depop.ts page.evaluate.

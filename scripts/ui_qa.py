@@ -516,13 +516,24 @@ with sync_playwright() as p:
             pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"),
         )
 
-    # enable switch off/on
+    # enable switch off/on. The starting state belongs to the live config --
+    # this item may already be paused -- so assert the flip, not an absolute
+    # state: asserting "disabled after one click" failed the day the user
+    # paused item.pc, which is a fact about their config, not a regression.
+    started_disabled = pg.eval_on_selector(S, "e=>e.classList.contains('disabled')")
     pg.click(S + " .ihead .sw")
     pg.wait_for_timeout(600)
-    check("disable greys card", pg.eval_on_selector(S, "e=>e.classList.contains('disabled')"))
+    check(
+        "enable switch flips the card",
+        pg.eval_on_selector(S, "e=>e.classList.contains('disabled')") != started_disabled,
+        "started " + ("paused" if started_disabled else "enabled"),
+    )
     pg.click(S + " .ihead .sw")
     pg.wait_for_timeout(600)
-    check("re-enable", not pg.eval_on_selector(S, "e=>e.classList.contains('disabled')"))
+    check(
+        "enable switch flips back",
+        pg.eval_on_selector(S, "e=>e.classList.contains('disabled')") == started_disabled,
+    )
 
     # End-state: the only acceptable diff is chips normalizing a legacy
     # bare-string search_phrases into an array. Reset buffer to the snapshot
@@ -637,6 +648,36 @@ with sync_playwright() as p:
         ".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)"
     )
     check("available source cards", set(avail) >= {"ebay", "depop", "poshmark"}, avail)
+
+    # --- the tile-scraping sources carry the same result cap as eBay: they
+    # return a whole search page at once and every tile costs an AI rating.
+    def open_marketplace_form(kind):
+        """Open a source's form whether or not it is already configured."""
+        if pg.query_selector(f".set.avail [data-setup-marketplace='{kind}']"):
+            pg.click(f".set.avail [data-setup-marketplace='{kind}']")
+        elif pg.query_selector(f"[data-edit-section='marketplace.{kind}']"):
+            pg.click(f"[data-edit-section='marketplace.{kind}']")
+        else:
+            return False
+        pg.wait_for_timeout(600)
+        return True
+
+    for kind in ("depop", "poshmark"):
+        opened = open_marketplace_form(kind)
+        check(f"{kind} form opens", opened)
+        if not opened:
+            continue
+        has_cap = bool(pg.query_selector("#field-max_listings"))
+        check(f"{kind} form offers a listing cap", has_cap)
+        kind_help = (
+            pg.eval_on_selector("#field-max_listings ~ .form-help", "e=>e.textContent") or ""
+            if has_cap
+            else ""
+        )
+        check(f"{kind} cap explains the AI cost", "AI rating" in kind_help, kind_help[:120])
+        pg.click("#form-cancel")
+        pg.wait_for_timeout(300)
+
     pg.click(".set.avail [data-setup-marketplace='ebay']")
     pg.wait_for_timeout(600)
     check(
@@ -672,6 +713,20 @@ with sync_playwright() as p:
             "e=>!!e.closest('.form-field').querySelector('.required')",
         ),
     )
+
+    # --- the result cap and the category filter. Both exist because an
+    # uncapped browser-mode search fed ~700 car-part tiles to Ollama, one
+    # 25-second rating at a time; the form has to say that out loud.
+    def field_help(key):
+        return pg.eval_on_selector(f"#field-{key} ~ .form-help", "e=>e.textContent") or ""
+
+    check("ebay form offers a listing cap", bool(pg.query_selector("#field-max_listings")))
+    cap_help = field_help("max_listings") if pg.query_selector("#field-max_listings") else ""
+    check("ebay cap states the default", "60" in cap_help, cap_help[:80])
+    check("ebay cap explains the AI cost", "AI rating" in cap_help, cap_help[:120])
+    check("ebay form offers a category id", bool(pg.query_selector("#field-category")))
+    cat_help = field_help("category") if pg.query_selector("#field-category") else ""
+    check("ebay category help gives an example id", "6001" in cat_help, cat_help[:120])
 
     # --- adding eBay with ZERO credentials must work and land enabled ---
     pg.click("#form-save")

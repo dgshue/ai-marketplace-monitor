@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from ai_marketplace_monitor.browser_market import DEFAULT_MAX_LISTINGS
 from ai_marketplace_monitor.ebay import (
     EbayBrowserMarketplace,
     EbayItemConfig,
@@ -149,3 +150,138 @@ def test_ebay_block_pages_are_recognized() -> None:
     assert any(m in "error page | ebay" for m in markers)
     # The inherited Cloudflare markers must survive.
     assert "just a moment" in markers
+
+
+# --------------------------------------------------------- result cap
+
+
+def item(**kwargs: Any) -> EbayItemConfig:
+    kwargs.setdefault("search_phrases", ["x"])
+    return EbayItemConfig(name="i", **kwargs)
+
+
+def test_page_size_follows_the_cap() -> None:
+    """No point downloading 240 tiles to rate 60 of them."""
+    assert "_ipg=60" in scraper().search_url("cam", item())
+    assert "_ipg=60" in scraper().search_url("cam", item(max_listings=60))
+    assert "_ipg=120" in scraper().search_url("cam", item(max_listings=61))
+    assert "_ipg=240" in scraper().search_url("cam", item(max_listings=240))
+    # Beyond the largest page eBay offers, ask for that page.
+    assert "_ipg=240" in scraper().search_url("cam", item(max_listings=1000))
+
+
+def test_item_cap_beats_marketplace_cap() -> None:
+    url = scraper(max_listings=200).search_url("cam", item(max_listings=30))
+    assert "_ipg=60" in url
+
+
+def test_browser_search_stops_at_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    market = scraper()
+    market.page = object()  # type: ignore[assignment]
+    tiles = [
+        {"id": str(1000 + i), "title": f"cam {i}", "price": "$10", "subtitles": [], "attrs": []}
+        for i in range(200)
+    ]
+    monkeypatch.setattr(market, "_fetch_tiles", lambda url: tiles)
+
+    assert len(list(market.search(item(max_listings=7)))) == 7
+    # And the default when nothing is configured, which is what an uncapped
+    # `car` item needed: 240 tiles per phrase was five hours of AI ratings.
+    assert len(list(market.search(item()))) == DEFAULT_MAX_LISTINGS
+
+
+def test_default_cap_is_the_browser_tile_default() -> None:
+    assert DEFAULT_MAX_LISTINGS == 60
+
+
+@pytest.mark.parametrize("bad", [0, -5, "many", True])
+def test_invalid_max_listings_rejected(bad: Any) -> None:
+    with pytest.raises(ValueError):
+        item(max_listings=bad)
+
+
+def test_quoted_max_listings_is_accepted() -> None:
+    assert item(max_listings="25").max_listings == 25
+
+
+# ---------------------------------------------------------- category
+
+
+def test_search_url_carries_the_category() -> None:
+    url = scraper(category="6001").search_url("toyota", item())
+    assert "_sacat=6001" in url
+
+
+def test_no_category_means_no_sacat() -> None:
+    assert "_sacat" not in scraper().search_url("toyota", item())
+
+
+def test_numeric_category_from_toml_is_accepted() -> None:
+    assert config(category=6001).category == "6001"
+
+
+def test_blank_category_reads_as_absent() -> None:
+    assert config(category="  ").category is None
+
+
+@pytest.mark.parametrize("bad", ["cars", "60 01", "6001a"])
+def test_non_numeric_category_rejected(bad: Any) -> None:
+    with pytest.raises(ValueError):
+        config(category=bad)
+
+
+# ------------------------------------------------------------- api mode
+
+
+class FakeResponse:
+    status_code = 200
+
+    def __init__(self: "FakeResponse", count: int) -> None:
+        self.count = count
+
+    def json(self: "FakeResponse") -> Any:
+        return {
+            "itemSummaries": [
+                {
+                    "itemId": f"v1|{i}|0",
+                    "title": f"item {i}",
+                    "price": {"value": "10.00", "currency": "USD"},
+                    "itemWebUrl": f"https://www.ebay.com/itm/{i}",
+                }
+                for i in range(self.count)
+            ]
+        }
+
+
+def api_market(monkeypatch: pytest.MonkeyPatch, **cfg: Any) -> tuple:
+    market = EbayMarketplace("ebay", None, None, None)
+    market.configure(config(client_id="id", client_secret="secret", **cfg))
+    monkeypatch.setattr(market, "_access_token", lambda: "token")
+    seen: dict = {}
+
+    def fake_get(url: str, **kwargs: Any) -> FakeResponse:
+        seen.update(kwargs.get("params") or {})
+        return FakeResponse(200)
+
+    monkeypatch.setattr("ai_marketplace_monitor.ebay.requests.get", fake_get)
+    return market, seen
+
+
+def test_api_mode_honors_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    market, seen = api_market(monkeypatch)
+    listings = list(market.search(item(max_listings=12)))
+    # Browse takes a limit, so the cap is asked for rather than filtered.
+    assert seen["limit"] == 12
+    assert len(listings) == 12
+
+
+def test_api_mode_without_a_cap_keeps_the_full_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    market, seen = api_market(monkeypatch)
+    assert len(list(market.search(item()))) == 200
+    assert seen["limit"] == 200
+
+
+def test_api_mode_passes_the_category(monkeypatch: pytest.MonkeyPatch) -> None:
+    market, seen = api_market(monkeypatch, category="6001")
+    list(market.search(item(max_listings=1)))
+    assert seen["category_ids"] == "6001"

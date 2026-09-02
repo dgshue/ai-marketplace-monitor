@@ -11,10 +11,11 @@ from urllib.parse import quote
 
 from .browser_market import BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
+from .marketplace import MARKETPLACE_DISPLAY_NAMES, MarketPlace
 
 
 class PoshmarkMarketplace(BrowserTileMarketplace):
-    display_name = "Poshmark"
+    display_name = MARKETPLACE_DISPLAY_NAMES[MarketPlace.POSHMARK.value]
     anchor_selector = 'a[href*="/listing/"]'
 
     # Ported near-verbatim from secondhand-mcp's poshmark.ts page.evaluate.

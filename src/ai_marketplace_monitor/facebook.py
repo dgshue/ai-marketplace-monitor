@@ -16,7 +16,9 @@ from rich.pretty import pretty_repr
 
 from .listing import Listing
 from .marketplace import (
+    MARKETPLACE_DISPLAY_NAMES,
     ItemConfig,
+    MarketPlace,
     Marketplace,
     MarketplaceBlockedError,
     MarketplaceConfig,
@@ -356,6 +358,7 @@ class FacebookMarketplace(Marketplace):
     initial_url = "https://www.facebook.com/login/device-based/regular/login/"
 
     name = "facebook"
+    display_name = MARKETPLACE_DISPLAY_NAMES[MarketPlace.FACEBOOK.value]
 
     def __init__(
         self: "FacebookMarketplace",
@@ -646,6 +649,11 @@ class FacebookMarketplace(Marketplace):
                     ]
 
             for search_phrase in item_config.search_phrases:
+                # Per-phrase cap. Unset means "everything the page offers",
+                # which is what this backend has always done; a value bounds
+                # how many AI ratings one phrase can cost.
+                max_listings = item_config.max_listings or self.config.max_listings
+                yielded = 0
                 if self.logger:
                     self.logger.info(
                         f"""{hilight("[Search]", "info")} Searching {self.name} for """
@@ -727,6 +735,15 @@ class FacebookMarketplace(Marketplace):
 
                     if self.check_listing(listing, item_config):
                         yield listing
+                        yielded += 1
+                        if max_listings and yielded >= max_listings:
+                            if self.logger:
+                                self.logger.info(
+                                    f"""{hilight("[Search]", "info")} Reached the """
+                                    f"""{max_listings}-listing cap for """
+                                    f"""{hilight(search_phrase)}; moving on."""
+                                )
+                            break
                     else:
                         counter.increment(CounterItem.EXCLUDED_LISTING, item_config.name)
 

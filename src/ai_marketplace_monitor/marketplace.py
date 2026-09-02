@@ -47,6 +47,31 @@ class MarketPlace(Enum):
     POSHMARK = "poshmark"
 
 
+# How each source is named to a human — in logs, and in the AI prompt. Keyed by
+# the value backends write to Listing.marketplace, so a listing can be traced
+# back to its source without asking the marketplace object (the AI backend only
+# ever sees the Listing). Every backend class mirrors its entry here as
+# `display_name`, which keeps one table authoritative.
+MARKETPLACE_DISPLAY_NAMES: Dict[str, str] = {
+    MarketPlace.FACEBOOK.value: "Facebook Marketplace",
+    MarketPlace.EBAY.value: "eBay",
+    MarketPlace.DEPOP.value: "Depop",
+    MarketPlace.POSHMARK.value: "Poshmark",
+}
+
+
+def marketplace_display_name(key: str | None) -> str | None:
+    """Display name for a Listing.marketplace value, or None when unknown.
+
+    None is a real answer, not a failure: a caller that cannot name the source
+    must say nothing about it rather than guess, which is exactly the bug this
+    replaced (every listing was described to the AI as a Facebook one).
+    """
+    if not key:
+        return None
+    return MARKETPLACE_DISPLAY_NAMES.get(str(key).strip().lower())
+
+
 class MarketplaceBlockedError(RuntimeError):
     """Raised when a marketplace answers with a block / rate-limit page.
 
@@ -226,6 +251,13 @@ class MarketItemCommonConfig(BaseConfig):
     search_region: List[str] | None = None
     max_price: str | None = None
     min_price: str | None = None
+    # Cap on how many listings one search phrase may hand to the AI. Every
+    # listing past this point is a full AI rating (~25s on a local Ollama), so
+    # an unbounded page of results is measured in hours, not requests: a
+    # four-phrase `car` item pulled ~700 eBay tiles and rated them for five
+    # hours. Unset means "no cap" here; the browser-tile backends apply their
+    # own default (see browser_market.DEFAULT_MAX_LISTINGS).
+    max_listings: int | None = None
     rating: List[int] | None = None
     prompt: str | None = None
     extra_prompt: str | None = None
@@ -324,6 +356,7 @@ class MarketItemCommonConfig(BaseConfig):
                 raise ValueError(
                     f"Item {hilight(self.name)} search_city '{city}' has incorrect format.\n"
                     f"Expected: lowercase letters and numbers only (e.g., 'sanfrancisco', 'newyork', 'toronto').\n"
+                    f"search_city is Facebook's own place slug; other sources ignore it.\n"
                     f"To get the correct value:\n"
                     f"  1. Visit Facebook Marketplace\n"
                     f"  2. Perform a search in your desired location\n"
@@ -499,6 +532,23 @@ class MarketItemCommonConfig(BaseConfig):
         elif not self.max_price.isdigit():
             raise ValueError(
                 f"Item {hilight(self.name)} max_price must be a number followed by currency name."
+            )
+
+    def handle_max_listings(self: "MarketItemCommonConfig") -> None:
+        if self.max_listings is None:
+            return
+        if isinstance(self.max_listings, str) and self.max_listings.strip().isdigit():
+            # The web UI writes a bare integer, but a hand-written config may
+            # quote it; accept both rather than fail the whole file over quotes.
+            self.max_listings = int(self.max_listings.strip())
+        if isinstance(self.max_listings, bool) or not isinstance(self.max_listings, int):
+            raise ValueError(
+                f"Item {hilight(self.name)} max_listings must be a positive whole number."
+            )
+        if self.max_listings < 1:
+            raise ValueError(
+                f"Item {hilight(self.name)} max_listings must be at least 1, "
+                f"not {self.max_listings}."
             )
 
     def handle_min_price(self: "MarketItemCommonConfig") -> None:
@@ -763,6 +813,9 @@ class Marketplace(Generic[TMarketplaceConfig, TItemConfig]):
     # `mode` picks between the REST API and a scrape) leaves this True and
     # narrows it per instance in needs_browser().
     requires_browser = True
+    # How this source is named to a human. Subclasses set it from
+    # MARKETPLACE_DISPLAY_NAMES so log lines and the AI prompt agree.
+    display_name = ""
 
     def __init__(
         self: "Marketplace",
