@@ -1,7 +1,20 @@
-"""Full UI QA: every view, every interaction, screenshots. No disk writes."""
+"""Full UI QA for the Triage web UI: every screen, every interaction, screenshots.
 
+Runs inside the deployed container against the real package. The web UI under
+test serves a PRIVATE COPY of the live config.toml: writing through the live
+file would make the running monitor clear its schedule and re-search every
+item immediately (see MarketplaceMonitor.start_monitor), which is exactly what
+must not happen during QA. The live file is snapshotted at start and asserted
+byte-identical at the end. The diskcache is shared with the live monitor; the
+harness only writes USER_FLAGS on rows it has undone again, plus two probe
+keys it deletes.
+"""
+
+import json
 import logging
 import os
+import re
+import shutil
 import time
 from pathlib import Path
 
@@ -19,24 +32,38 @@ os.environ["FACEBOOK_PASSWORD"] = "pw"
 from ai_marketplace_monitor.webui.log_handler import LogBroadcastHandler
 from ai_marketplace_monitor.webui.server import WebUIConfig, start_webui
 
+LIVE_CONFIG = Path("/root/.ai-marketplace-monitor/config.toml")
+QA_DIR = Path("/tmp/qa")
+QA_DIR.mkdir(exist_ok=True)
+QA_CONFIG = QA_DIR / "config.toml"
+_LIVE_BYTES = LIVE_CONFIG.read_bytes()
+shutil.copyfile(LIVE_CONFIG, QA_CONFIG)
+
 srv, info = start_webui(
     WebUIConfig(
         host="0.0.0.0",
         port=8476,
-        config_files=[Path("/root/.ai-marketplace-monitor/config.toml")],
+        config_files=[QA_CONFIG],
         log_handler=LogBroadcastHandler(capacity=50),
     ),
     logger=log,
 )
 time.sleep(2)
-
-os.makedirs("/tmp/qa", exist_ok=True)
+BASE = "http://127.0.0.1:8476"
 results = []
+
+
+def check(name, ok, extra=""):
+    results.append((name, bool(ok), extra))
+    print(
+        ("PASS " if ok else "FAIL ") + name + (("  | " + str(extra)) if extra else ""), flush=True
+    )
+
 
 # ---------- pre-browser unit: tile-preferred detail merge ----------
 from ai_marketplace_monitor.facebook import FacebookMarketplace as _FB
 
-_fb = _FB.__new__(_FB)  # _prefer_tile needs no construction state
+_fb = _FB.__new__(_FB)
 _cases = [
     (("**unspecified**", "$8,995"), "$8,995"),
     (("Seller's description", "Winston-Salem, NC"), "Winston-Salem, NC"),
@@ -44,14 +71,9 @@ _cases = [
     (("$450", "$999"), "$450"),
     (("", None), ""),
 ]
-_ok = all(_fb._prefer_tile(a, b) == want for (a, b), want in _cases)
-print(("PASS " if _ok else "FAIL ") + "tile-preferred merge unit")
-results.append(("tile-preferred merge unit", _ok, ""))
+check("tile-preferred merge unit", all(_fb._prefer_tile(a, b) == want for (a, b), want in _cases))
 
 # ---------- pre-browser unit: the drift-proof rating join ----------
-# Reproduces the field-drift failure that hid a notified vehicle: details
-# cached with price '**unspecified**' while the rating was written against
-# the tile price. The identity join must still attach the rating.
 from ai_marketplace_monitor.utils import CacheType as _CT
 from ai_marketplace_monitor.utils import cache as _cache
 from ai_marketplace_monitor.webui.activity import build_activity as _ba
@@ -80,852 +102,1303 @@ _cache.set(
     tag=_CT.AI_BY_LISTING.value,
 )
 try:
-    _out = _ba(_cache, [Path("/root/.ai-marketplace-monitor/config.toml")], limit=2000)
+    _out = _ba(_cache, [QA_CONFIG], limit=2000)
     _hit = [r for r in _out["listings"] if r["id"] == "qa-drift-probe"]
-    ok = bool(_hit) and _hit[0]["item"] == "car" and _hit[0]["score"] == 4
-    print(
-        ("PASS " if ok else "FAIL ") + "drift-proof rating join",
-        "| row:",
-        _hit[0]["item"] if _hit else "MISSING",
+    check(
+        "drift-proof rating join",
+        bool(_hit) and _hit[0]["item"] == "car" and _hit[0]["score"] == 4,
     )
-    results.append(("drift-proof rating join", ok, ""))
+    check(
+        "activity rows carry kept + reviewed_at",
+        bool(_hit) and _hit[0]["kept"] is False and "reviewed_at" in _hit[0],
+        (
+            {k: _hit[0][k] for k in ("kept", "reviewed_at", "hidden", "my_rank")}
+            if _hit
+            else "MISSING"
+        ),
+    )
 finally:
     _cache.delete((_CT.LISTING_DETAILS.value, _probe_url))
     _cache.delete((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"))
 
 
-def check(name, ok, extra=""):
-    results.append((name, bool(ok), extra))
-    print(("PASS " if ok else "FAIL ") + name + (("  | " + str(extra)) if extra else ""))
+def js(pg, code, *args):
+    return pg.evaluate(code, *args)
+
+
+def visible(pg, sel):
+    return pg.is_visible(sel)
+
+
+def overflow(pg):
+    return js(pg, "document.documentElement.scrollWidth - document.documentElement.clientWidth")
+
+
+def cm_value(pg):
+    return js(pg, "document.querySelector('.CodeMirror').CodeMirror.getValue()")
+
+
+def segment(buf, header):
+    """The body of a real ``[section]`` header line (commented examples don't count)."""
+    m = re.search(r"(?m)^" + re.escape(header) + r"[ \t]*$", buf)
+    if not m:
+        return ""
+    return buf[m.end() :].split("\n[")[0]
+
+
+def line_for(seg, key):
+    hits = [ln for ln in seg.splitlines() if ln.strip().startswith(key)]
+    return hits[0] if hits else ""
+
+
+def restore(pg, snapshot):
+    """Put the snapshot back in the editor and persist it (buffer == disk)."""
+    pg.evaluate(
+        "(s) => { document.querySelector('.CodeMirror').CodeMirror.setValue(s); }", snapshot
+    )
+    pg.wait_for_timeout(300)
+    pg.evaluate("() => window.AIMM.config.save()")
+    pg.wait_for_timeout(600)
+    return js(pg, "document.querySelector('#save-btn').disabled")
+
+
+def api_rows(pg):
+    return pg.request.get(BASE + "/api/activity").json()["listings"]
+
+
+def api_row(pg, key):
+    mk, lid = key.split(":", 1)
+    return next((r for r in api_rows(pg) if r["marketplace"] == mk and r["id"] == lid), None)
+
+
+def go(pg, view):
+    pg.click(f"[data-view={view}]:visible")
+    pg.wait_for_timeout(600)
+
+
+def open_item(pg, name):
+    """Open an item's editor from wherever the Items screen currently is."""
+    if js(pg, "document.querySelector('#items-page').dataset.section || ''") == name:
+        return
+    if visible(pg, "#items-back"):
+        pg.click("#items-back")
+        pg.wait_for_timeout(300)
+    pg.click(f"#items-page [data-open-item='{name}']")
+    pg.wait_for_timeout(450)
 
 
 msgs = []
 with sync_playwright() as p:
     b = p.chromium.launch()
-    pg = b.new_page(viewport={"width": 1500, "height": 950})
-    pg.on("console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", ""))))
-    pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
 
-    # ---------- asset cache policy: an upgrade must never leave a stale app.js ----------
+    # ---------- asset cache policy: an upgrade must never leave a stale module ----------
     import urllib.request as _u
 
     def _cc(path):
-        with _u.urlopen("http://127.0.0.1:8476" + path, timeout=10) as r:
-            return r.headers.get("Cache-Control", "")
+        with _u.urlopen(BASE + path, timeout=10) as r:  # noqa: S310
+            return r.headers.get("Cache-Control", ""), r.headers.get("Content-Type", "")
 
-    check("app.js is no-cache", "no-cache" in _cc("/static/app.js"), _cc("/static/app.js"))
-    check("app.css is no-cache", "no-cache" in _cc("/static/app.css"))
-    check("index is no-cache", "no-cache" in _cc("/"))
+    for asset in (
+        "/static/app-core.js",
+        "/static/app-review.js",
+        "/static/app-config.js",
+        "/static/app-status.js",
+        "/static/app.css",
+    ):
+        check(f"{asset.split('/')[-1]} is no-cache", "no-cache" in _cc(asset)[0])
+    check("index is no-cache", "no-cache" in _cc("/")[0])
     check(
-        "vendor assets stay cacheable", "no-cache" not in _cc("/static/vendor/leaflet/leaflet.js")
+        "vendor assets stay cacheable",
+        "no-cache" not in _cc("/static/vendor/leaflet/leaflet.js")[0],
     )
+    with _u.urlopen(BASE + "/static/manifest.webmanifest", timeout=10) as r:  # noqa: S310
+        _manifest = json.loads(r.read().decode())
+    check(
+        "web app manifest served",
+        _manifest.get("display") == "standalone" and _manifest.get("theme_color") == "#0e1117",
+    )
+    with _u.urlopen(BASE + "/", timeout=10) as r:  # noqa: S310
+        _index = r.read().decode()
+    check(
+        "viewport-fit=cover + theme-color in the shell",
+        "viewport-fit=cover" in _index and 'name="theme-color"' in _index,
+    )
+    check("old app.js is gone from the shell", "/static/app.js" not in _index)
 
-    # ---------- login ----------
-    pg.goto("http://127.0.0.1:8476/", wait_until="load")
+    # ---------- proxy-auth mode: no password form, an SSO hint instead ----------
+    ctx0 = b.new_context(
+        viewport={"width": 390, "height": 844},
+        device_scale_factor=2,
+        is_mobile=True,
+        has_touch=True,
+    )
+    pg0 = ctx0.new_page()
+    pg0.route(
+        "**/api/auth/info",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"open": False, "username_hint": None, "proxy_auth": True, "password_login": False}
+            ),
+        ),
+    )
+    pg0.goto(BASE + "/", wait_until="load")
+    pg0.wait_for_timeout(1200)
+    check(
+        "proxy mode hides the password form",
+        visible(pg0, "#login-screen") and not visible(pg0, "#login-fields"),
+    )
+    check(
+        "proxy mode explains where sign-in happens",
+        "identity provider" in (pg0.text_content("#login-subtitle") or ""),
+        (pg0.text_content("#login-subtitle") or "")[:60],
+    )
+    ctx0.close()
+
+    # =====================================================================
+    # Desktop pass (1440x900): login, review flow, keyboard, config, status
+    # =====================================================================
+    ctx = b.new_context(viewport={"width": 1440, "height": 900})
+    pg = ctx.new_page()
+    pg.on("console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", ""))))
+    pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
+    pg.on("dialog", lambda d: d.accept())
+
+    pg.goto(BASE + "/", wait_until="load")
     pg.wait_for_timeout(900)
-    pg.screenshot(path="/tmp/qa/0-login.png")
+    check(
+        "login screen shown when signed out",
+        visible(pg, "#login-form") and visible(pg, "#login-fields"),
+    )
+    pg.screenshot(path="/tmp/qa/login-desktop.png")
     pg.fill("input[name=username]", "t@e.com")
+    pg.fill("input[name=password]", "wrong")
+    pg.click("#login-submit")
+    pg.wait_for_timeout(800)
+    check(
+        "bad password shows an error", visible(pg, "#login-error"), pg.text_content("#login-error")
+    )
     pg.fill("input[name=password]", "pw")
     pg.click("#login-submit")
     pg.wait_for_timeout(4000)
-    check("login", not pg.eval_on_selector("#app", "e=>e.classList.contains('hidden')"))
+    check("login", not js(pg, "document.querySelector('#app').classList.contains('hidden')"))
+    check("csrf token captured", bool(js(pg, "window.AIMM.state.csrf")))
 
     # ---------- the downloadable log carries no credentials ----------
-    # Uses the browser context's session cookie, exactly as a user's download would.
-    import re as _re
-
-    _dl = pg.request.get("http://127.0.0.1:8476/api/logs/download")
+    _dl = pg.request.get(BASE + "/api/logs/download")
     _body = _dl.text() if _dl.ok else ""
     _real_hits = _body.count(_REAL_PASSWORD) if len(_REAL_PASSWORD) >= 4 else 0
-    _unmasked = _re.findall(
-        r"password\s*=\s*['\"](?!\*\*\*REDACTED|<redacted>)[^'\"]+['\"]", _body
-    )
+    _unmasked = re.findall(r"password\s*=\s*['\"](?!\*\*\*REDACTED|<redacted>)[^'\"]+['\"]", _body)
     check(
         "downloaded log has no plaintext password",
         _dl.ok and not _real_hits and not _unmasked,
         f"HTTP {_dl.status}, {len(_body)} bytes, real={_real_hits}, unmasked={len(_unmasked)}",
     )
 
-    # ---------- deals ----------
-    n_rows = pg.eval_on_selector_all(".dli", "e=>e.length")
-    check("deals list rows", n_rows > 10, n_rows)
-    check("deals detail", pg.eval_on_selector("#deal-detail h2", "e=>!!e.textContent"))
-    pg.click(".dli:nth-child(4)")
-    pg.wait_for_timeout(400)
+    # ---------- review: queue rendering ----------
+    pg.wait_for_timeout(1500)
+    n_all = js(pg, "window.AIMM.review.listings.length")
+    check("activity rows loaded", n_all > 10, n_all)
+    q0 = js(pg, "window.__aimm.queueRows().length")
     check(
-        "deals selection",
-        pg.eval_on_selector(".dli:nth-child(4)", "e=>e.classList.contains('sel')"),
+        "queue derived from user decisions",
+        js(pg, "window.__aimm.queueRows().every(r => !window.__aimm.isReviewed(r))"),
+        f"{q0} in queue",
     )
-    pg.click(".dd-myrank .star[data-rank='5']")
-    pg.wait_for_timeout(900)
-    check("star set", pg.eval_on_selector_all(".dd-myrank .star.on", "e=>e.length") == 5)
-    key = pg.eval_on_selector(".dli.sel", "e=>e.dataset.key")
-    pg.click("[data-flag=hide]")
-    pg.wait_for_timeout(900)
-    check("dismiss hides", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 0)
-    pg.click(".verdict-chips [data-verdict=hidden]")
-    pg.wait_for_timeout(600)
     check(
-        "hidden chip shows", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 1
+        "reviewed = kept | hidden | rated",
+        js(pg, "window.__aimm.reviewedRows().every(r => r.kept || r.hidden || r.my_rank != null)"),
     )
-    pg.click(f".dli[data-key='{key}']")
-    pg.wait_for_timeout(400)
-    pg.click("[data-flag=hide]")
-    pg.wait_for_timeout(900)
-    pg.click(".verdict-chips [data-verdict='']")
-    pg.wait_for_timeout(600)
     check(
-        "restore returns", pg.eval_on_selector_all(f".dli[data-key='{key}']", "e=>e.length") == 1
+        "queue excludes paused items",
+        js(pg, "window.__aimm.queueRows().every(r => r.item_active !== false)"),
     )
-    pg.click(f".dli[data-key='{key}']")
-    pg.wait_for_timeout(300)
-    pg.click(".dd-myrank .star[data-rank='5']")  # clear rank
-    pg.wait_for_timeout(700)
-    check("star cleared", pg.eval_on_selector_all(".dd-myrank .star.on", "e=>e.length") == 0)
-    pg.click(".verdict-chips [data-verdict=promising]")
-    pg.wait_for_timeout(500)
-    promising = pg.eval_on_selector_all(".dli", "e=>e.length")
-    check("promising filter", True, f"{promising} rows")
-    pg.click(".verdict-chips [data-verdict='']")
-    pg.wait_for_timeout(400)
+    check(
+        "segmented counts render",
+        js(pg, "+document.querySelector('#n-queue').textContent") == q0
+        and js(pg, "+document.querySelector('#n-all').textContent") > 0,
+    )
+    check(
+        "progress line reads 'N to review'",
+        re.match(r"^\d+ to review$", pg.text_content("#q-count") or "") is not None,
+        pg.text_content("#q-count"),
+    )
+    check(
+        "today strip renders",
+        "today" in (pg.text_content("#today-strip") or ""),
+        (pg.text_content("#today-strip") or "")[:60],
+    )
+    check("top card present", visible(pg, "#stack .tcard.top"))
+    check(
+        "card shows score, price, title and AI reasoning",
+        js(
+            pg,
+            "!!document.querySelector('#stack .tcard.top .sc') && !!document.querySelector('#stack .tcard.top .price') && !!document.querySelector('#stack .tcard.top .title')",
+        ),
+    )
+    check(
+        "KEEP / NOPE stamps on the card",
+        js(pg, "document.querySelectorAll('#stack .tcard.top .stamp').length") == 2,
+    )
+    check(
+        "desktop: rail lists the queue",
+        js(pg, "document.querySelectorAll('#rail .lrow').length") >= min(q0, 5),
+    )
+    check(
+        "desktop: keyboard panel + session counters",
+        visible(pg, "#keys") and js(pg, "document.querySelectorAll('#keys .k').length") >= 12,
+    )
+    check("desktop: tab bar hidden", not visible(pg, "#tabs"))
+    check(
+        "tab badge equals queue size",
+        js(pg, "document.querySelector('#tab-badge').textContent") == str(q0) or q0 > 99,
+    )
+    pg.screenshot(path="/tmp/qa/queue-desktop.png")
 
-    # --- item pills: summary row filters on click ---
-    n_pills = pg.eval_on_selector_all("#activity-summary .ipill", "e=>e.length")
-    check("item pills render", n_pills >= 2, n_pills)
-    first_item = pg.eval_on_selector(
-        "#activity-summary .ipill[data-item-pill]:not([data-item-pill=''])",
-        "e=>e.dataset.itemPill",
+    def top_key():
+        return js(
+            pg, "(document.querySelector('#stack .tcard.top') || {dataset:{}}).dataset.key || null"
+        )
+
+    # ---------- keep / dismiss / rate / undo round-trips through the flag API ----------
+    k1 = top_key()
+    pg.click("#act-keep")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check(
+        "keep button -> kept flag + reviewed_at",
+        r1 and r1["kept"] is True and r1["reviewed_at"],
+        k1,
     )
-    pg.click(f"#activity-summary .ipill[data-item-pill='{first_item}']")
+    check("keep advances to the next card", top_key() != k1)
+    check(
+        "kept listing leaves the queue",
+        js(
+            pg,
+            "!window.__aimm.queueRows().some(r => window.__aimm.rowKey(r) === arguments0)".replace(
+                "arguments0", json.dumps(k1)
+            ),
+        ),
+    )
+    check(
+        "reviewed count grows", js(pg, "+document.querySelector('#n-reviewed').textContent") >= 1
+    )
+    check(
+        "session panel counts the keep",
+        js(pg, "+document.querySelector('#sess-kept').textContent") >= 1,
+    )
+    check("undo toast offered", visible(pg, "#toast") and visible(pg, "#toast-undo"))
+    pg.keyboard.press("z")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check(
+        "Z undoes the keep (flag cleared, back in queue)",
+        r1 and not r1["kept"] and not r1["reviewed_at"] and top_key() == k1,
+    )
+
+    pg.keyboard.press("ArrowLeft")
+    pg.wait_for_timeout(1300)
+    r1 = api_row(pg, k1)
+    check("← dismisses (hidden flag)", r1 and r1["hidden"] is True and r1["reviewed_at"], k1)
+    check("dismissed listing leaves the queue", top_key() != k1)
+    pg.click("#act-undo")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check("Undo button restores after dismiss", r1 and not r1["hidden"] and top_key() == k1)
+
+    pg.keyboard.press("4")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check("4 rates the current listing", r1 and r1["my_rank"] == 4)
+    check("a rating alone counts as reviewed", r1 and r1["reviewed_at"] and top_key() != k1)
+    pg.keyboard.press("z")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check("undo clears the rating", r1 and r1["my_rank"] is None and not r1["reviewed_at"])
+
+    pg.keyboard.press("h")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check("H hides the listing", r1 and r1["hidden"] is True)
+    pg.keyboard.press("z")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check(
+        "flags restored after the round-trips",
+        r1 and not r1["hidden"] and not r1["kept"] and r1["my_rank"] is None and top_key() == k1,
+    )
+
+    # ---------- keyboard: J/K, Enter/Esc, O, R, ? ----------
+    pg.keyboard.press("j")
+    pg.wait_for_timeout(300)
+    k2 = top_key()
+    check(
+        "J moves to the next listing",
+        k2 != k1 and js(pg, "document.querySelector('#rail .lrow.cur').dataset.key") == k2,
+    )
+    pg.keyboard.press("k")
+    pg.wait_for_timeout(300)
+    check("K moves back", top_key() == k1)
+    pg.keyboard.press("Enter")
     pg.wait_for_timeout(500)
-    rows_match = pg.evaluate(
-        "(item) => Array.from(document.querySelectorAll('.dli .m span:first-child')).every(x => x.textContent === item)",
+    check("Enter expands details", visible(pg, "#detail-pane") and not visible(pg, "#queue-pane"))
+    check(
+        "detail header reads 'n of N · item · marketplace'",
+        re.match(r"^\d+ of \d+ · .+ · .+$", pg.text_content("#detail-pane .dbar .t") or "")
+        is not None,
+        pg.text_content("#detail-pane .dbar .t"),
+    )
+    check(
+        "detail shows badges, threshold fact, AI reasoning and rating buttons",
+        js(
+            pg,
+            "document.querySelectorAll('#detail-pane .badges .sc').length === 1 && document.body.innerText.includes('notify ≥') && !!document.querySelector('#detail-pane .why2') && document.querySelectorAll('#detail-pane .rate5 .star').length === 5",
+        ),
+    )
+    check(
+        "detail action bar: Dismiss / Open / Keep",
+        visible(pg, "#dd-dismiss")
+        and visible(pg, "#dd-keep")
+        and (
+            visible(pg, "#dd-open")
+            or not js(
+                pg,
+                "!!window.AIMM.review.listings.find(r => window.__aimm.rowKey(r) === arguments0 && r.url)".replace(
+                    "arguments0", json.dumps(k1)
+                ),
+            )
+        ),
+    )
+    pg.click("#detail-pane .star[data-rank='5']")
+    pg.wait_for_timeout(1000)
+    check(
+        "star button rates 5",
+        (api_row(pg, k1) or {}).get("my_rank") == 5
+        and js(pg, "document.querySelectorAll('#detail-pane .star.on').length") == 1,
+    )
+    check(
+        "detail stays on the rated listing",
+        js(pg, "window.AIMM.review.cursor") == k1
+        and "reviewed" in (pg.text_content("#detail-pane .dbar .t") or ""),
+    )
+    pg.click("#detail-pane .star[data-rank='5']")
+    pg.wait_for_timeout(1000)
+    check("same star clears the rating", (api_row(pg, k1) or {}).get("my_rank") is None)
+    with ctx.expect_page() as newpage:
+        pg.keyboard.press("o")
+    check("O opens the listing in a new tab", newpage.value is not None)
+    newpage.value.close()
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(400)
+    check("Esc collapses details", not visible(pg, "#detail-pane") and visible(pg, "#queue-pane"))
+    js(
+        pg,
+        "() => { window.__qaSearch = 0; window.AIMM.searchNow = () => { window.__qaSearch++; }; }",
+    )
+    pg.keyboard.press("r")
+    pg.wait_for_timeout(200)
+    check("R triggers Search now", js(pg, "window.__qaSearch") == 1)
+    pg.keyboard.press("?")
+    pg.wait_for_timeout(300)
+    check("? opens the cheatsheet", visible(pg, "#keys-modal"))
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(200)
+    check("Esc closes the cheatsheet", not visible(pg, "#keys-modal"))
+    pg.click("#activity-filter")
+    pg.keyboard.press("1")  # would rate the listing if the shortcut fired
+    pg.wait_for_timeout(600)
+    check(
+        "keys are ignored while typing",
+        (api_row(pg, k1) or {}).get("my_rank") is None
+        and pg.input_value("#activity-filter") == "1",
+    )
+    pg.fill("#activity-filter", "")
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(300)
+
+    # ---------- swipe gesture (synthesized pointer events) ----------
+    def card_box():
+        return pg.eval_on_selector(
+            "#stack .tcard.top",
+            "e => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }",
+        )
+
+    x, y, w, h = card_box()
+    cx, cy = x + w / 2, y + h / 2
+    pg.mouse.move(cx, cy)
+    pg.mouse.down()
+    for i in range(1, 7):
+        pg.mouse.move(cx + w * 0.2 * i / 6, cy + 2, steps=2)
+        pg.wait_for_timeout(60)
+    pg.wait_for_timeout(200)  # a pause before lifting: not a fling
+    stamp = js(
+        pg,
+        "parseFloat(document.querySelector('#stack .tcard.top .stamp.keep').style.opacity || 0)",
+    )
+    check("drag right fades the KEEP stamp in with distance", 0.3 < stamp < 0.9, stamp)
+    pg.mouse.up()
+    pg.wait_for_timeout(500)
+    check(
+        "short drag snaps back (below 40% width)",
+        top_key() == k1
+        and js(pg, "document.querySelector('#stack .tcard.top').style.transform") == "",
+    )
+    x, y, w, h = card_box()
+    cx, cy = x + w / 2, y + h / 2
+    pg.mouse.move(cx, cy)
+    pg.mouse.down()
+    for i in range(1, 9):
+        pg.mouse.move(cx + w * 0.55 * i / 8, cy, steps=2)
+        pg.wait_for_timeout(30)
+    pg.screenshot(path="/tmp/qa/swipe-desktop.png")
+    check(
+        "release-to-keep state at threshold",
+        js(pg, "document.querySelector('#act-keep').classList.contains('hot')"),
+    )
+    pg.mouse.up()
+    pg.wait_for_timeout(1300)
+    r1 = api_row(pg, k1)
+    check("swipe right keeps", r1 and r1["kept"] is True and top_key() != k1)
+    pg.keyboard.press("z")
+    pg.wait_for_timeout(1200)
+    x, y, w, h = card_box()
+    cx, cy = x + w / 2, y + h / 2
+    pg.mouse.move(cx, cy)
+    pg.mouse.down()
+    for i in range(1, 9):
+        pg.mouse.move(cx - w * 0.55 * i / 8, cy, steps=2)
+        pg.wait_for_timeout(30)
+    pg.mouse.up()
+    pg.wait_for_timeout(1300)
+    r1 = api_row(pg, k1)
+    check("swipe left dismisses", r1 and r1["hidden"] is True)
+    pg.keyboard.press("z")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check(
+        "flags clean after the swipe tests",
+        r1 and not r1["kept"] and not r1["hidden"] and top_key() == k1,
+    )
+    pg.mouse.click(cx, cy)
+    pg.wait_for_timeout(500)
+    check("tap on the card opens details", visible(pg, "#detail-pane"))
+    pg.click("#detail-back")
+    pg.wait_for_timeout(300)
+
+    # ---------- Queue / Reviewed / All + filters + sorts ----------
+    pg.click("#act-keep")
+    pg.wait_for_timeout(1200)
+    pg.click("[data-mode=reviewed]:visible")
+    pg.wait_for_timeout(500)
+    check(
+        "Reviewed lists the kept listing",
+        js(
+            pg,
+            "!!document.querySelector('#rail .lrow[data-key=' + JSON.stringify(arguments0) + ']')".replace(
+                "arguments0", json.dumps(k1)
+            ),
+        ),
+    )
+    check(
+        "Reviewed: kept rows grouped with Undo affordance",
+        js(
+            pg,
+            "!!document.querySelector('#rail .grp') && !!document.querySelector('#rail [data-undo-row]')",
+        ),
+    )
+    check(
+        "desktop: Reviewed shows the current row's detail in the centre",
+        visible(pg, "#detail-pane"),
+    )
+    pg.screenshot(path="/tmp/qa/reviewed-desktop.png")
+    pg.click(f"#rail [data-undo-row={json.dumps(k1)}]")
+    pg.wait_for_timeout(1200)
+    r1 = api_row(pg, k1)
+    check("row Undo returns it to the queue", r1 and not r1["kept"] and not r1["reviewed_at"])
+
+    pg.click("[data-mode=all]:visible")
+    pg.wait_for_timeout(500)
+    check(
+        "All view lists every visible listing in the rail",
+        js(pg, "document.querySelectorAll('#rail .lrow').length")
+        == js(pg, "Math.min(200, window.__aimm.allRows().length)"),
+    )
+    check(
+        "desktop: filters live in the rail",
+        js(pg, "document.querySelector('#rail-filters #review-filters') !== null")
+        and visible(pg, "#deal-sort"),
+    )
+    check("verdict chips only in All", visible(pg, "#verdict-chips"))
+    n_pills = js(pg, "document.querySelectorAll('#item-pills [data-item-pill]').length")
+    check("item pills render", n_pills >= 2, n_pills)
+    first_item = js(
+        pg,
+        "document.querySelector('#item-pills [data-item-pill]:not([data-item-pill=\"\"])').dataset.itemPill",
+    )
+    pg.click(f"#item-pills [data-item-pill='{first_item}']")
+    pg.wait_for_timeout(400)
+    check(
+        "pill filters rows",
+        js(
+            pg,
+            "window.__aimm.allRows().every(r => r.item === arguments0)".replace(
+                "arguments0", json.dumps(first_item)
+            ),
+        ),
         first_item,
     )
-    check("pill filters rows", rows_match, first_item)
     check(
         "pill active state",
-        pg.eval_on_selector(
-            f"#activity-summary .ipill[data-item-pill='{first_item}']",
-            "e=>e.classList.contains('on')",
+        js(
+            pg,
+            f"document.querySelector('#item-pills [data-item-pill=\"{first_item}\"]').classList.contains('on')",
         ),
     )
-    pg.click(f"#activity-summary .ipill[data-item-pill='{first_item}']")
-    pg.wait_for_timeout(500)
+    pg.click(f"#item-pills [data-item-pill='{first_item}']")
+    pg.wait_for_timeout(400)
     check(
-        "pill toggles back to All",
-        pg.eval_on_selector(
-            "#activity-summary .ipill[data-item-pill='']", "e=>e.classList.contains('on')"
+        "pill toggles back to All items",
+        js(
+            pg,
+            "document.querySelector('#item-pills [data-item-pill=\"\"]').classList.contains('on')",
         ),
     )
-
-    # --- paused items: out of the All view, reachable via their dimmed pill ---
-    paused = pg.eval_on_selector_all(
-        "#activity-summary .ipill.paused", "e=>e.map(x=>x.dataset.itemPill)"
+    paused = js(
+        pg,
+        "Array.from(document.querySelectorAll('#item-pills .chip.paused')).map(x => x.dataset.itemPill)",
     )
     if paused:
-        hidden_ok = pg.evaluate(
-            "(names) => !Array.from(document.querySelectorAll('.dli .m span:first-child')).some(x => names.includes(x.textContent))",
+        check(
+            "paused items absent from All",
+            js(
+                pg,
+                "!window.__aimm.allRows().some(r => arguments0.includes(r.item))".replace(
+                    "arguments0", json.dumps(paused)
+                ),
+            ),
             paused,
         )
-        check("paused items absent from All", hidden_ok, paused)
-        pg.click(f"#activity-summary .ipill[data-item-pill='{paused[0]}']")
-        pg.wait_for_timeout(500)
-        shown = pg.eval_on_selector_all(".dli", "e=>e.length")
-        check("paused pill shows its history", shown > 0, f"{paused[0]}: {shown} rows")
-        pg.click(f"#activity-summary .ipill[data-item-pill='{paused[0]}']")
+        pg.click(f"#item-pills [data-item-pill='{paused[0]}']")
         pg.wait_for_timeout(400)
+        check(
+            "paused pill shows its history",
+            js(pg, "window.__aimm.allRows().length") > 0,
+            paused[0],
+        )
+        pg.click(f"#item-pills [data-item-pill='{paused[0]}']")
+        pg.wait_for_timeout(300)
     else:
         check("paused pills (none configured)", True, "no paused items on disk")
-
-    pg.fill("#activity-filter", "3090")
-    pg.wait_for_timeout(400)
-    check("text filter", pg.eval_on_selector_all(".dli", "e=>e.length") > 0)
+    pg.click("#verdict-chips [data-verdict=promising]")
+    pg.wait_for_timeout(300)
+    check(
+        "promising chip filters on the AI verdict",
+        js(pg, "window.__aimm.allRows().every(r => r.verdict === 'promising')"),
+    )
+    pg.click("#verdict-chips [data-verdict=hidden]")
+    pg.wait_for_timeout(300)
+    check(
+        "hidden chip shows only dismissed-by-me rows",
+        js(pg, "window.__aimm.allRows().every(r => r.hidden)"),
+    )
+    pg.click("#verdict-chips [data-verdict='']")
+    pg.wait_for_timeout(300)
+    check("all chip hides hidden rows", js(pg, "window.__aimm.allRows().every(r => !r.hidden)"))
+    pg.fill("#activity-filter", "a")
+    pg.wait_for_timeout(300)
+    check(
+        "text filter narrows",
+        js(pg, "window.__aimm.allRows().every(r => /a/i.test(r.title) || /a/i.test(r.comment))")
+        and js(pg, "window.__aimm.allRows().length") > 0,
+    )
     pg.fill("#activity-filter", "")
-    pg.wait_for_timeout(400)
-    check("csv button", bool(pg.query_selector("#export-csv-btn")))
-
-    # --- sort control: each mode must actually reorder; blanks sort last ---
-    check("sort control present", bool(pg.query_selector("#deal-sort")))
-
-    def list_order():
-        return pg.eval_on_selector_all(".dli", "e=>e.map(x=>x.dataset.key)")
+    pg.wait_for_timeout(300)
+    check("csv button", visible(pg, "#export-csv-btn"))
+    check(
+        "csv endpoint streams a CSV",
+        pg.request.get(BASE + "/api/found.csv")
+        .headers.get("content-type", "")
+        .startswith("text/csv"),
+    )
 
     def sort_by(mode):
         pg.select_option("#deal-sort", mode)
-        pg.wait_for_timeout(500)
-        return list_order()
+        pg.wait_for_timeout(400)
+        return js(
+            pg,
+            "window.__aimm.allRows().map(r => [r.score, r.distance_mi, r.rated_at || 0, r.my_rank || 0])",
+        )
 
-    by_score = sort_by("score")
-    scores = pg.eval_on_selector_all(".dli .score-badge", "e=>e.map(x=>parseInt(x.textContent))")
+    rows = sort_by("score")
+    scores = [r[0] for r in rows]
     check("sort: best rated descending", scores == sorted(scores, reverse=True), scores[:6])
-    sort_by("distance")
-    dists = pg.evaluate(
-        "(() => Array.from(document.querySelectorAll('.dli')).map(r => {"
-        " const m = (r.innerText.match(/([0-9.]+) mi/) || [])[1];"
-        " return m ? parseFloat(m) : null; }))()"
-    )
-    known = [d for d in dists if d is not None]
-    idx_known = [i for i, d in enumerate(dists) if d is not None]
-    idx_null = [i for i, d in enumerate(dists) if d is None]
+    rows = sort_by("distance")
+    known = [r[1] for r in rows if r[1] is not None]
+    idx_null = [i for i, r in enumerate(rows) if r[1] is None]
+    idx_known = [i for i, r in enumerate(rows) if r[1] is not None]
     check("sort: nearest ascending", known == sorted(known), known[:6])
     check(
         "sort: unresolvable distances last",
         (not idx_null) or (not idx_known) or min(idx_null) > max(idx_known),
-        f"{len(known)} with distance, {len(idx_null)} without",
     )
-    by_new = sort_by("newest")
-    check("sort: newest is a valid ordering", len(by_new) == len(by_score))
-    sort_by("myrank")
-    check("sort: my rating mode", len(list_order()) == len(by_score))
+    rows = sort_by("newest")
+    stamps = [r[2] for r in rows]
+    check("sort: newest first", stamps == sorted(stamps, reverse=True))
+    rows = sort_by("myrank")
+    ranks = [r[3] for r in rows]
+    check("sort: my rating first", ranks == sorted(ranks, reverse=True))
     sort_by("score")
-
-    # --- no PDP junk artifacts anywhere in the deals surface ---
-    junk_hits = pg.evaluate(
-        "['**unspecified**', \"Seller's description\", 'View seller profile']"
-        ".map(j => document.body.innerText.includes(j) ? j : null).filter(Boolean)"
+    check("sort persists", js(pg, "localStorage.getItem('aimm.dealSort')") == "score")
+    check(
+        "no junk scrape artifacts rendered",
+        not js(
+            pg,
+            "['**unspecified**', \"Seller's description\", 'View seller profile'].filter(j => document.body.innerText.includes(j))",
+        ),
     )
-    check("no junk scrape artifacts rendered", not junk_hits, junk_hits)
+    pg.screenshot(path="/tmp/qa/all-desktop.png")
 
-    # --- layout guards: the detail media must never blow the page wide ---
-    overflow = pg.evaluate(
-        "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+    # ---------- detail media: photo, map, route ----------
+    fb_key = js(
+        pg,
+        "(() => { const r = window.__aimm.allRows().find(r => r.marketplace === 'facebook' && r.coords); return r ? window.__aimm.rowKey(r) : null; })()",
     )
-    check("no horizontal page overflow", overflow <= 1, f"{overflow}px")
-    if pg.query_selector("#dd-map"):
-        import json as _j
-
-        _r = _j.loads(
-            pg.eval_on_selector("#dd-map", "e=>JSON.stringify(e.getBoundingClientRect())")
-        )
-        check("map confined to media rail", _r["width"] <= 620, "%.0fpx" % _r["width"])
-        check("map is large enough to read", _r["height"] >= 300, "%.0fpx tall" % _r["height"])
-        pg.wait_for_timeout(5000)
-        _pts = pg.evaluate(
-            "(() => { let best = 0;"
-            " document.querySelectorAll('#dd-map path.leaflet-interactive').forEach(el => {"
-            " const d = el.getAttribute('d') || '';"
-            " best = Math.max(best, (d.match(/[ML]/g) || []).length); });"
-            " return best; })()"
-        )
-        check("route geometry drawn (not a 2-point line)", _pts >= 5, f"{_pts} vertices")
-        _drive = (
-            pg.eval_on_selector("#dd-drive", "e=>e.textContent")
-            if pg.query_selector("#dd-drive")
-            else ""
-        )
-        check(
-            "drive time sits in the price header",
-            ("by road" in _drive) or _drive == "",
-            _drive[:40] or "(routing unavailable - soft)",
-        )
-
-    # --- media: photo snapshot, pickup map, drive time on a facebook row ---
-    picked = pg.evaluate(
-        """(() => {
-      const rows = document.querySelectorAll('.dli');
-      for (const r of rows) {
-        const src = r.querySelector('.m span:nth-child(2)');
-        if (src && src.textContent === 'facebook') return r.dataset.key;
-      }
-      return null; })()"""
-    )
-    if picked:
-        pg.click(f".dli[data-key='{picked}']")
+    if fb_key:
+        pg.click(f"#rail .lrow[data-key={json.dumps(fb_key)}]")
         pg.wait_for_timeout(2500)
-        has_photo = bool(pg.query_selector(".dd-photo"))
+        check(
+            "desktop: rail click shows the detail",
+            visible(pg, "#detail-pane") and (pg.text_content("#detail-pane h2") or "") != "",
+        )
+        has_photo = js(pg, "!!document.querySelector('#detail-pane .ph img')")
         check(
             "photo element for fb row",
             True,
             "shown" if has_photo else "hidden (image expired — acceptable)",
         )
-        map_ok = pg.evaluate(
-            "!!document.querySelector('#dd-map .leaflet-container, #dd-map.leaflet-container')"
-        )
-        coords = pg.evaluate("(k)=>{return true}", picked)
-        check(
-            "pickup map mounts",
-            map_ok or not pg.query_selector("#dd-map"),
-            "map" if map_ok else "no coords for this row",
-        )
-        pg.wait_for_timeout(4000)
-        route_txt = (
-            pg.eval_on_selector("#dd-route", "e=>e.textContent")
-            if pg.query_selector("#dd-route")
-            else ""
+        check("pickup map mounts", js(pg, "!!document.querySelector('#dd-map.leaflet-container')"))
+        rect = js(
+            pg,
+            "JSON.parse(JSON.stringify(document.querySelector('#dd-map').getBoundingClientRect()))",
         )
         check(
-            "drive estimate",
-            ("drive" in route_txt) or route_txt == "",
-            route_txt[:60] or "(routing unavailable — soft)",
+            "map is large enough to read",
+            rect["height"] >= 200 and rect["width"] >= 300,
+            "%.0fx%.0f" % (rect["width"], rect["height"]),
         )
+        pg.wait_for_timeout(5000)
+        pts = js(
+            pg,
+            "(() => { let best = 0; document.querySelectorAll('#dd-map path.leaflet-interactive').forEach(el => { const d = el.getAttribute('d') || ''; best = Math.max(best, (d.match(/[ML]/g) || []).length); }); return best; })()",
+        )
+        route_line = pg.text_content("#dd-drive-line") or ""
+        if pts >= 5:
+            check("route geometry drawn (not a 2-point line)", True, f"{pts} vertices")
+            check(
+                "drive time and road miles in the header",
+                "by road" in route_line and "min" in route_line,
+                route_line[:60],
+            )
+        else:
+            check(
+                "route geometry drawn (routing unavailable - soft)",
+                "estimating" not in route_line,
+                route_line[:60],
+            )
+        check("straight-line distance shown", "mi away" in route_line, route_line[:40])
+        pg.screenshot(path="/tmp/qa/detail-desktop.png", full_page=True)
     else:
-        check("media checks (no facebook rows)", True, "skipped")
-    pg.screenshot(path="/tmp/qa/1-deals.png")
+        check("media checks (no facebook rows with coords)", True, "skipped")
+    pg.click("[data-mode=queue]:visible")
+    pg.wait_for_timeout(300)
 
-    # ---------- config: item cards ----------
-    pg.click("#app-nav button[data-appview=config]")
-    pg.wait_for_timeout(1000)
-    snapshot = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
-    n_cards = pg.eval_on_selector_all(".icard", "e=>e.length")
-    check("item cards render", n_cards >= 4, n_cards)
-    check("cards collapsed by default", pg.eval_on_selector_all(".icard.open", "e=>e.length") == 0)
-    check(
-        "sources strip",
-        pg.eval_on_selector_all(".set", "e=>e.length") >= 3,
-        pg.eval_on_selector_all(".set .t", "e=>e.map(x=>x.textContent.trim())"),
+    # =====================================================================
+    # Items (config)
+    # =====================================================================
+    go(pg, "items")
+    pg.wait_for_timeout(800)
+    snapshot = cm_value(pg)
+    item_rows = js(
+        pg,
+        "Array.from(document.querySelectorAll('#items-page [data-open-item]')).map(x => x.dataset.openItem)",
     )
-    check("add item btn", bool(pg.query_selector('[data-add="item"]')))
-
-    S = ".icard[data-section='item.pc']"
-    pg.click(S + " .ihead")
-    pg.wait_for_timeout(400)
-    check("card expands", pg.eval_on_selector(S, "e=>e.classList.contains('open')"))
-    pg.screenshot(path="/tmp/qa/2-config-open.png")
-
-    # ---------- pacing: the cadence has to be visible without opening a modal ----------
-    cadences = pg.eval_on_selector_all(".icard .icadence", "e=>e.map(x=>x.textContent.trim())")
+    check("item list renders", len(item_rows) >= 4, item_rows)
     check(
-        "every item card shows its cadence",
-        len(cadences) == n_cards and all(c.startswith(("every ", "at ")) for c in cadences),
-        cadences[:6],
+        "item rows summarise phrases, price, threshold and cadence",
+        js(
+            pg,
+            "Array.from(document.querySelectorAll('#items-page [data-open-item] small')).every(s => /≥ \\d/.test(s.textContent) && /(every |at )/.test(s.textContent))",
+        ),
     )
+    check("+ New item present", visible(pg, "#items-page [data-add=item]"))
+    pg.screenshot(path="/tmp/qa/items-desktop.png", full_page=True)
+    S = "item.pc" if "item.pc" in item_rows else item_rows[0]
+    open_item(pg, S)
+    check(
+        "item editor opens",
+        js(pg, "document.querySelector('#items-page').dataset.section") == S
+        and visible(pg, "#items-back"),
+    )
+    check(
+        "editor groups: phrases, matching, sources, schedule, danger",
+        js(pg, "document.querySelectorAll('#items-page .gl').length") >= 5,
+    )
+    pg.screenshot(path="/tmp/qa/item-edit-desktop.png", full_page=True)
+
+    # ---------- pacing: cadence visible without opening a modal ----------
+    cad = pg.text_content("#items-page .icadence") or ""
+    check("item editor shows its cadence", cad.startswith(("every ", "at ")), cad)
     check(
         "interval fields are inline, not behind a modal",
-        bool(pg.query_selector(S + " [data-field=search_interval]"))
-        and bool(pg.query_selector(S + " [data-field=max_search_interval]")),
+        visible(pg, "#items-page [data-field=search_interval]")
+        and visible(pg, "#items-page [data-field=max_search_interval]"),
     )
     check(
         "cadence note explains where the value came from",
         any(
             w
-            in (pg.eval_on_selector_all(S + " .thr-note", "e=>e.map(x=>x.textContent)") or [""])[
-                -1
-            ]
+            in (
+                pg.text_content("#items-page .icadence").strip()
+                + (
+                    js(
+                        pg,
+                        "document.querySelector('#items-page .icadence').parentElement.textContent",
+                    )
+                    or ""
+                )
+            )
             for w in ("set on this item", "inherited from the marketplace", "default")
         ),
-        pg.eval_on_selector_all(S + " .thr-note", "e=>e.map(x=>x.textContent.trim())"),
     )
-    # writing a human duration must land in the buffer as a string, then revert
-    orig_int = pg.eval_on_selector(S + " [data-field=search_interval]", "e=>e.value")
-    pg.fill(S + " [data-field=search_interval]", "2h")
-    pg.eval_on_selector(S + " [data-field=search_interval]", "e=>e.blur()")
-    pg.wait_for_timeout(700)
-    seg_iv = pg.evaluate(
-        "document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]"
-    )
+    orig_int = pg.input_value("#items-page [data-field=search_interval]")
+    pg.fill("#items-page [data-field=search_interval]", "2h")
+    pg.dispatch_event("#items-page [data-field=search_interval]", "change")
+    pg.wait_for_timeout(600)
+    seg_iv = segment(cm_value(pg), f"[{S}]")
     check("interval writes a duration string", 'search_interval = "2h"' in seg_iv, seg_iv[:120])
     check(
         "cadence label follows the edit",
-        "every 2h" in pg.eval_on_selector(S + " .icadence", "e=>e.textContent"),
-        pg.eval_on_selector(S + " .icadence", "e=>e.textContent"),
+        "every 2h" in (pg.text_content("#items-page .icadence") or ""),
     )
-    pg.fill(S + " [data-field=search_interval]", orig_int)
-    pg.eval_on_selector(S + " [data-field=search_interval]", "e=>e.blur()")
-    pg.wait_for_timeout(700)
+    pg.wait_for_timeout(1400)
+    check(
+        "inline edits auto-save",
+        "saved" in (pg.text_content("#item-foot") or "")
+        and js(pg, "document.querySelector('#save-btn').disabled"),
+        pg.text_content("#item-foot"),
+    )
+    pg.fill("#items-page [data-field=search_interval]", orig_int)
+    pg.dispatch_event("#items-page [data-field=search_interval]", "change")
+    pg.wait_for_timeout(600)
 
     # chips: add then remove a phrase (net zero)
-    pg.fill(S + " [data-chip-add='search_phrases']", "qa test phrase")
-    pg.press(S + " [data-chip-add='search_phrases']", "Enter")
-    pg.wait_for_timeout(700)
-    in_toml = pg.evaluate(
-        "document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa test phrase')"
-    )
-    check("chip add writes TOML", in_toml)
-    pg.click(S + " [data-chip-del='search_phrases'][data-chip-val='qa test phrase']")
-    pg.wait_for_timeout(700)
-    out_toml = pg.evaluate(
-        "!document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa test phrase')"
-    )
-    check("chip remove cleans TOML", out_toml)
-
+    pg.fill("#items-page [data-chip-add=search_phrases]", "qa test phrase")
+    pg.press("#items-page [data-chip-add=search_phrases]", "Enter")
+    pg.wait_for_timeout(600)
+    check("chip add writes TOML", "qa test phrase" in cm_value(pg))
+    pg.click("#items-page [data-chip-del=search_phrases][data-chip-val='qa test phrase']")
+    pg.wait_for_timeout(600)
+    check("chip remove cleans TOML", "qa test phrase" not in cm_value(pg))
     # description edit + revert
-    orig_desc = pg.eval_on_selector(S + " [data-field=description]", "e=>e.value")
-    pg.fill(S + " [data-field=description]", "qa description probe")
-    pg.eval_on_selector(S + " [data-field=description]", "e=>e.blur()")
+    orig_desc = pg.input_value("#items-page [data-field=description]")
+    pg.fill("#items-page [data-field=description]", "qa description probe")
+    pg.dispatch_event("#items-page [data-field=description]", "change")
+    pg.wait_for_timeout(600)
+    check("description writes", "qa description probe" in cm_value(pg))
+    pg.fill("#items-page [data-field=description]", orig_desc)
+    pg.dispatch_event("#items-page [data-field=description]", "change")
+    pg.wait_for_timeout(600)
+    # price int + clear back to original
+    orig_max = pg.input_value("#items-page [data-field=max_price]")
+    pg.fill("#items-page [data-field=max_price]", "912")
+    pg.dispatch_event("#items-page [data-field=max_price]", "change")
+    pg.wait_for_timeout(600)
+    seg = segment(cm_value(pg), f"[{S}]")
+    check("price writes unquoted int", "max_price = 912" in seg and 'max_price = "912"' not in seg)
+    pg.fill("#items-page [data-field=max_price]", orig_max)
+    pg.dispatch_event("#items-page [data-field=max_price]", "change")
+    pg.wait_for_timeout(600)
+    # threshold stepper: set explicit, clear back to inherit
+    eff = int(pg.text_content("#items-page .thr-val"))
+    pg.click("#items-page [data-thr-dec]" if eff > 1 else "#items-page [data-thr-inc]")
     pg.wait_for_timeout(700)
+    want = eff - 1 if eff > 1 else eff + 1
+    check("threshold stepper writes rating", f"rating = {want}" in segment(cm_value(pg), f"[{S}]"))
     check(
-        "description writes",
-        pg.evaluate(
-            "document.querySelector('.CodeMirror').CodeMirror.getValue().includes('qa description probe')"
+        "threshold note shows the meaning",
+        bool(
+            re.search(
+                r"(everything|potential|poor|good|great)",
+                pg.text_content("#items-page .thr-note") or "",
+            )
         ),
     )
-    pg.fill(S + " [data-field=description]", orig_desc)
-    pg.eval_on_selector(S + " [data-field=description]", "e=>e.blur()")
+    pg.click("#items-page [data-thr-clear]")
     pg.wait_for_timeout(700)
-
-    # price int + clear back to original
-    orig_max = pg.eval_on_selector(S + " [data-field=max_price]", "e=>e.value")
-    pg.fill(S + " [data-field=max_price]", "912")
-    pg.eval_on_selector(S + " [data-field=max_price]", "e=>e.blur()")
-    pg.wait_for_timeout(700)
-    seg = pg.evaluate(
-        "(() => { const v=document.querySelector('.CodeMirror').CodeMirror.getValue(); return v.split('[item.pc]')[1].split('\\n[')[0]; })()"
-    )
-    check("price writes unquoted int", "max_price = 912" in seg and 'max_price = "912"' not in seg)
-    pg.fill(S + " [data-field=max_price]", orig_max)
-    pg.eval_on_selector(S + " [data-field=max_price]", "e=>e.blur()")
-    pg.wait_for_timeout(700)
-
-    # threshold set + clear (verify against the BUFFER, the source of truth)
-    pg.click(S + " .thr button[data-thr='2']")
-    pg.wait_for_timeout(800)
-    seg_thr = pg.evaluate(
-        "document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]"
-    )
-    check("threshold set writes", "rating = 2" in seg_thr)
-    check(
-        "threshold note shows",
-        "≥ 2"
-        in pg.eval_on_selector(S + " .thr .on", "e=>e.parentElement.nextElementSibling ? '' : ''")
-        or "≥ 2" in pg.eval_on_selector(S + " .thr-note", "e=>e.textContent"),
-    )
-    pg.click(S + " .thr button[data-thr='2']")
-    pg.wait_for_timeout(800)
-    seg_thr2 = pg.evaluate(
-        "document.querySelector('.CodeMirror').CodeMirror.getValue().split('[item.pc]')[1].split(String.fromCharCode(10)+'[')[0]"
-    )
-    check("threshold clear removes", "rating" not in seg_thr2)
-    check(
-        "cleared note inherits",
-        "inherited" in pg.eval_on_selector(S + " .thr-note", "e=>e.textContent"),
-    )
-
+    check("threshold reset removes rating", "rating" not in segment(cm_value(pg), f"[{S}]"))
+    check("cleared note inherits", "inherited" in (pg.text_content("#items-page .thr-note") or ""))
     # source toggle: with 2+ sources it toggles; with one, the guard refuses
-    n_sources = pg.eval_on_selector_all(S + " .src", "e=>e.length")
-    pg.click(S + " .src[data-src=facebook]")
-    pg.wait_for_timeout(700)
+    n_sources = js(pg, "document.querySelectorAll('#items-page [data-src]').length")
+    pg.click("#items-page [data-src=facebook]")
+    pg.wait_for_timeout(600)
     if n_sources >= 2:
         check(
             "source off",
-            not pg.eval_on_selector(
-                S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"
+            not js(
+                pg,
+                "document.querySelector('#items-page [data-src=facebook]').classList.contains('on')",
             ),
         )
-        pg.click(S + " .src[data-src=facebook]")
-        pg.wait_for_timeout(700)
+        pg.click("#items-page [data-src=facebook]")
+        pg.wait_for_timeout(600)
         check(
             "source back on",
-            pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"),
+            js(
+                pg,
+                "document.querySelector('#items-page [data-src=facebook]').classList.contains('on')",
+            ),
         )
     else:
-        status = pg.eval_on_selector("#editor-status", "e=>e.textContent")
-        check("single-source guard refuses", "at least one source" in status, status[:60])
+        check(
+            "single-source guard refuses",
+            "at least one source" in (pg.text_content("#item-foot") or ""),
+        )
         check(
             "source stays on",
-            pg.eval_on_selector(S + " .src[data-src=facebook]", "e=>e.classList.contains('on')"),
+            js(
+                pg,
+                "document.querySelector('#items-page [data-src=facebook]').classList.contains('on')",
+            ),
         )
-
-    # enable switch off/on. The starting state belongs to the live config --
-    # this item may already be paused -- so assert the flip, not an absolute
-    # state: asserting "disabled after one click" failed the day the user
-    # paused item.pc, which is a fact about their config, not a regression.
-    started_disabled = pg.eval_on_selector(S, "e=>e.classList.contains('disabled')")
-    pg.click(S + " .ihead .sw")
+    # paused switch flips and flips back (the starting state belongs to the live config)
+    started_paused = js(
+        pg, "document.querySelector('#items-page [data-toggle=enabled]').classList.contains('on')"
+    )
+    pg.click("#items-page [data-toggle=enabled]")
     pg.wait_for_timeout(600)
     check(
-        "enable switch flips the card",
-        pg.eval_on_selector(S, "e=>e.classList.contains('disabled')") != started_disabled,
-        "started " + ("paused" if started_disabled else "enabled"),
+        "pause switch flips the item",
+        js(
+            pg,
+            "document.querySelector('#items-page [data-toggle=enabled]').classList.contains('on')",
+        )
+        != started_paused,
+        "started " + ("paused" if started_paused else "enabled"),
     )
-    pg.click(S + " .ihead .sw")
+    pg.click("#items-page [data-toggle=enabled]")
     pg.wait_for_timeout(600)
     check(
-        "enable switch flips back",
-        pg.eval_on_selector(S, "e=>e.classList.contains('disabled')") == started_disabled,
+        "pause switch flips back",
+        js(
+            pg,
+            "document.querySelector('#items-page [data-toggle=enabled]').classList.contains('on')",
+        )
+        == started_paused,
     )
-
-    # End-state: the only acceptable diff is chips normalizing a legacy
-    # bare-string search_phrases into an array. Reset buffer to the snapshot
-    # so nothing is left dirty, then confirm Save disables.
-    final = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
+    pg.wait_for_timeout(1500)
+    final = cm_value(pg)
     if final != snapshot:
         import difflib
 
         diff = [
-            line
-            for line in difflib.unified_diff(
-                snapshot.splitlines(), final.splitlines(), lineterm=""
-            )
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+            ln
+            for ln in difflib.unified_diff(snapshot.splitlines(), final.splitlines(), lineterm="")
+            if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))
         ]
-        only_norm = all("search_phrases" in line for line in diff)
-        check("buffer diff is only phrase normalization", only_norm, diff[:6])
+        check(
+            "buffer diff is only phrase normalization",
+            all("search_phrases" in ln for ln in diff),
+            diff[:6],
+        )
     else:
         check("buffer pristine", True)
-    (
-        pg.evaluate(
-            "document.querySelector('.CodeMirror').CodeMirror.setValue("
-            + repr(0)
-            + " ? '' : arguments)"
-        )
-        if False
-        else None
-    )
-    pg.evaluate(
-        "(s) => { const cm=document.querySelector('.CodeMirror').CodeMirror; cm.setValue(s); }",
-        snapshot,
-    )
-    pg.wait_for_timeout(600)
-    check("buffer reset (Save disabled)", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+    check("buffer reset (Save disabled)", restore(pg, snapshot))
 
-    # modals open + cancel (no saves)
-    pg.click(S + " [data-act=edit]")
+    # ---------- modals from the editor ----------
+    open_item(pg, S)
+    pg.click("#items-page [data-act=edit]")
     pg.wait_for_timeout(500)
-    check(
-        "More settings opens modal",
-        not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
-    )
-    # The schedule fields are the whole point of the pacing work -- they must
-    # render with "Show advanced fields" OFF.
+    check("More settings opens modal", visible(pg, "#form-modal"))
     pg.click(".form-tab-bar .form-tab:nth-child(2)")
-    pg.wait_for_timeout(350)
-    adv_off = (
-        pg.eval_on_selector("#show-advanced", "e=>!e.checked")
-        if pg.query_selector("#show-advanced")
-        else True
+    pg.wait_for_timeout(300)
+    adv_off = js(
+        pg,
+        "!document.querySelector('#show-advanced') || !document.querySelector('#show-advanced').checked",
     )
     check(
         "item schedule fields are not advanced-only",
         adv_off
-        and bool(pg.query_selector("#field-search_interval"))
-        and bool(pg.query_selector("#field-max_search_interval")),
-        "advanced off" if adv_off else "advanced was already on",
+        and visible(pg, "#field-search_interval")
+        and visible(pg, "#field-max_search_interval"),
     )
+    pg.screenshot(path="/tmp/qa/modal-desktop.png")
     pg.click("#form-cancel")
     pg.wait_for_timeout(300)
-    pg.click(".set [data-edit-section='marketplace.facebook']")
+    # rename preserves every field
+    before_keys = sorted(re.findall(r"^\s*([a-z_]+)\s*=", segment(cm_value(pg), f"[{S}]"), re.M))
+    pg.click("#items-page [data-act=rename]")
     pg.wait_for_timeout(500)
     check(
-        "strip Edit opens modal",
-        not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
+        "rename opens the form with the name focused",
+        visible(pg, "#form-modal")
+        and js(pg, "document.activeElement && document.activeElement.id === 'add-section-name'"),
     )
-    pg.click("#form-cancel")
-    pg.wait_for_timeout(300)
-    pg.click('[data-add="item"]')
+    pg.click("#add-section-name")
+    pg.fill("#add-section-name", S.split(".")[1] + "_qa")
+    pg.click("#form-save")
+    pg.wait_for_timeout(1500)
+    buf = cm_value(pg)
+    new_name = f"[{S}_qa]"
+    after_keys = sorted(re.findall(r"^\s*([a-z_]+)\s*=", segment(buf, new_name), re.M))
+    check("rename rewrites the header", new_name in buf and f"[{S}]\n" not in buf)
+    check(
+        "rename preserves every field", after_keys == before_keys, f"{before_keys} -> {after_keys}"
+    )
+    check(
+        "editor follows the renamed item",
+        pg.text_content("#items-title") == S.split(".")[1] + "_qa",
+    )
+    check("disk restored after rename", restore(pg, snapshot))
+    pg.wait_for_timeout(400)
+    check(
+        "editor falls back to the list once the renamed item is gone",
+        not visible(pg, "#items-back") and visible(pg, "#items-page [data-add=item]"),
+    )
+
+    # ---------- add-section flows: item (then delete), user, ai ----------
+    pg.click("#items-page [data-add=item]")
     pg.wait_for_timeout(500)
     check(
         "Add item opens modal",
-        not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')"),
+        visible(pg, "#form-modal") and "item" in (pg.text_content("#form-modal-title") or ""),
     )
-    pg.click("#form-cancel")
-    pg.wait_for_timeout(300)
+    pg.click("#add-section-name")
+    pg.fill("#add-section-name", "qaitem")
+    pg.click("#field-search_phrases")
+    pg.fill("#field-search_phrases", "qa phrase one, qa phrase two")
+    pg.click("#form-save")
+    pg.wait_for_timeout(1500)
+    buf = cm_value(pg)
+    check(
+        "item add lands a section with a phrase array",
+        segment(buf, "[item.qaitem]") != ""
+        and 'search_phrases = ["qa phrase one", "qa phrase two"]' in segment(buf, "[item.qaitem]"),
+    )
+    check(
+        "new item opens in the editor",
+        js(pg, "document.querySelector('#items-page').dataset.section") == "item.qaitem",
+    )
+    pg.click("#items-page [data-act=delete]")
+    pg.wait_for_timeout(1500)
+    check(
+        "delete removes the section (confirm accepted)",
+        "[item.qaitem]" not in cm_value(pg)
+        and not js(pg, "document.querySelector('#items-page').dataset.section"),
+    )
+    check("disk restored after item add/delete", restore(pg, snapshot))
 
-    # --- available sources appear with Set up, prefilled to the right type ---
-    # The block below exercises the eBay *add* path, which needs the section
-    # absent. Browser mode needs no keys, so a real config may well already
-    # have [marketplace.ebay] on disk -- drop it from the buffer and save, and
-    # let the snapshot restore at the end of the block put it back.
-    def drop_ebay_section():
-        """Free the eBay section name so the Set-up card is offered again."""
-        if not pg.query_selector("[data-edit-section='marketplace.ebay']"):
-            return
-        pg.evaluate(
-            """() => {
-              const cm = document.querySelector('.CodeMirror').CodeMirror;
-              const nl = String.fromCharCode(10);
-              const lines = cm.getValue().split(nl);
-              const start = lines.findIndex((l) => l.trim() === '[marketplace.ebay]');
-              if (start < 0) return;
-              let end = start + 1;
-              while (end < lines.length && !lines[end].trim().startsWith('[')) end++;
-              lines.splice(start, end - start);
-              cm.setValue(lines.join(nl));
-            }"""
+    go(pg, "sources")
+    pg.wait_for_timeout(600)
+    pg.click("#sources-page [data-add=user]")
+    pg.wait_for_timeout(500)
+    pg.click("#add-section-name")
+    pg.fill("#add-section-name", "qauser")
+    pg.click("#field-ntfy_topic")
+    pg.fill("#field-ntfy_topic", "qa-topic")
+    pg.click("#form-save")
+    pg.wait_for_timeout(1500)
+    check(
+        "user add lands a section",
+        'ntfy_topic = "qa-topic"' in segment(cm_value(pg), "[user.qauser]"),
+    )
+    check(
+        "sources lists the new user",
+        visible(pg, "#sources-page [data-edit-section='user.qauser']"),
+    )
+    check("disk restored after user add", restore(pg, snapshot))
+    pg.click("#sources-page [data-add=ai]")
+    pg.wait_for_timeout(500)
+    check(
+        "AI add offers a provider select",
+        js(pg, "document.querySelector('#add-section-name').tagName") == "SELECT",
+    )
+    existing_ai = js(
+        pg,
+        "Array.from(document.querySelectorAll('#sources-page [data-edit-section^=\"ai.\"]')).map(x => x.dataset.editSection)",
+    )
+    provider = next(
+        p_ for p_ in ("openai", "deepseek", "anthropic", "ollama") if f"ai.{p_}" not in existing_ai
+    )
+    pg.select_option("#add-section-name", provider)
+    pg.wait_for_timeout(200)
+    check(
+        "AI add prefills the env-var key reference",
+        pg.input_value("#field-api_key") == "${" + provider.upper() + "_API_KEY}",
+    )
+    pg.click("#field-api_key")
+    pg.fill("#field-api_key", "qa-key")  # the env var is unset here; the validator needs a string
+    pg.click("#field-model")
+    pg.fill("#field-model", "qa-model")
+    pg.click("#form-save")
+    pg.wait_for_timeout(1500)
+    check(
+        "AI add lands a section", 'model = "qa-model"' in segment(cm_value(pg), f"[ai.{provider}]")
+    )
+    check("disk restored after AI add", restore(pg, snapshot))
+
+    # ---------- sources: marketplace rows + keyless eBay set-up ----------
+    pg.wait_for_timeout(500)
+    mk_rows = js(
+        pg,
+        "Array.from(document.querySelectorAll('#sources-page [data-edit-section^=\"marketplace.\"]')).map(x => x.dataset.editSection)",
+    )
+    check("marketplace rows render", "marketplace.facebook" in mk_rows, mk_rows)
+    fb_txt = pg.text_content("#sources-page [data-edit-section='marketplace.facebook']") or ""
+    check(
+        "facebook row reports sign-in state and home",
+        ("signed in" in fb_txt or "session" in fb_txt or "not signed" in fb_txt)
+        and "home" in fb_txt,
+        fb_txt[:90],
+    )
+    check(
+        "plumbing rows: AI, notification, user",
+        js(
+            pg,
+            'document.querySelectorAll(\'#sources-page [data-edit-section^="ai."], #sources-page [data-edit-section^="notification."], #sources-page [data-edit-section^="user."]\').length',
         )
-        pg.wait_for_timeout(700)
-        if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
-            pg.click("#save-btn")
-            pg.wait_for_timeout(1500)
+        >= 2,
+    )
+    check(
+        "env-status lines render",
+        js(pg, "document.querySelectorAll('#sources-page .envline').length") >= 1,
+    )
+    check(
+        "browser (noVNC) link",
+        "path=ws/vnc" in (js(pg, "document.querySelector('#browser-btn').href") or ""),
+    )
+    pg.screenshot(path="/tmp/qa/sources-desktop.png", full_page=True)
+
+    def drop_ebay_section():
+        buf = cm_value(pg)
+        if "[marketplace.ebay]" not in buf:
+            return
+        lines = buf.split("\n")
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "[marketplace.ebay]")
+        end = start + 1
+        while end < len(lines) and not lines[end].strip().startswith("["):
+            end += 1
+        del lines[start:end]
+        restore(pg, "\n".join(lines))
+        pg.wait_for_timeout(500)
 
     drop_ebay_section()
     check(
         "ebay section name free for the add-path test",
-        not pg.query_selector("[data-edit-section='marketplace.ebay']"),
-        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
+        not visible(pg, "#sources-page [data-edit-section='marketplace.ebay']"),
     )
-    avail = pg.eval_on_selector_all(
-        ".set.avail [data-setup-marketplace]", "e=>e.map(x=>x.dataset.setupMarketplace)"
+    avail = js(
+        pg,
+        "Array.from(document.querySelectorAll('#sources-page [data-setup-marketplace]')).map(x => x.dataset.setupMarketplace)",
     )
-    check("available source cards", set(avail) >= {"ebay", "depop", "poshmark"}, avail)
+    check("available source rows offer Set up", set(avail) >= {"ebay", "depop", "poshmark"}, avail)
 
-    # --- the tile-scraping sources carry the same result cap as eBay: they
-    # return a whole search page at once and every tile costs an AI rating.
     def open_marketplace_form(kind):
-        """Open a source's form whether or not it is already configured."""
-        if pg.query_selector(f".set.avail [data-setup-marketplace='{kind}']"):
-            pg.click(f".set.avail [data-setup-marketplace='{kind}']")
-        elif pg.query_selector(f"[data-edit-section='marketplace.{kind}']"):
-            pg.click(f"[data-edit-section='marketplace.{kind}']")
+        if visible(pg, f"#sources-page [data-setup-marketplace='{kind}']"):
+            pg.click(f"#sources-page [data-setup-marketplace='{kind}']")
+        elif visible(pg, f"#sources-page [data-edit-section='marketplace.{kind}']"):
+            pg.click(f"#sources-page [data-edit-section='marketplace.{kind}']")
         else:
             return False
-        pg.wait_for_timeout(600)
+        pg.wait_for_timeout(500)
         return True
+
+    def field_help(key):
+        return js(
+            pg, f"(document.querySelector('#field-{key} ~ .form-help') || {{}}).textContent || ''"
+        )
 
     for kind in ("depop", "poshmark"):
         opened = open_marketplace_form(kind)
         check(f"{kind} form opens", opened)
         if not opened:
             continue
-        has_cap = bool(pg.query_selector("#field-max_listings"))
-        check(f"{kind} form offers a listing cap", has_cap)
-        kind_help = (
-            pg.eval_on_selector("#field-max_listings ~ .form-help", "e=>e.textContent") or ""
-            if has_cap
-            else ""
-        )
-        check(f"{kind} cap explains the AI cost", "AI rating" in kind_help, kind_help[:120])
+        check(f"{kind} form offers a listing cap", visible(pg, "#field-max_listings"))
+        check(f"{kind} cap explains the AI cost", "AI rating" in field_help("max_listings"))
         pg.click("#form-cancel")
-        pg.wait_for_timeout(300)
+        pg.wait_for_timeout(250)
 
-    pg.click(".set.avail [data-setup-marketplace='ebay']")
-    pg.wait_for_timeout(600)
+    pg.click("#sources-page [data-setup-marketplace='ebay']")
+    pg.wait_for_timeout(500)
+    check("setup modal prefilled", pg.input_value("#add-section-name") == "ebay")
+    check("setup uses ebay schema", visible(pg, "#field-client_id"))
+    check("setup tab says eBay", "eBay" in (pg.text_content(".form-tab-bar .form-tab") or ""))
     check(
-        "setup modal prefilled", pg.eval_on_selector("#add-section-name", "e=>e.value") == "ebay"
+        "name input autofill-proof", js(pg, "document.querySelector('#add-section-name').readOnly")
     )
-    check("setup uses ebay schema", bool(pg.query_selector("#field-client_id")))
-    check(
-        "setup tab says eBay",
-        "eBay" in pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent"),
-    )
-    check("name input autofill-proof", pg.eval_on_selector("#add-section-name", "e=>e.readOnly"))
-    check("field autofill-proof", pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
+    check("field autofill-proof", js(pg, "document.querySelector('#field-client_id').readOnly"))
     pg.click("#field-client_id")
-    check("field opens on focus", not pg.eval_on_selector("#field-client_id", "e=>e.readOnly"))
-    # --- eBay mode select: the whole point is that no developer key is needed,
-    # so the choice has to be visible and the credentials must not be required.
-    has_mode = bool(pg.query_selector("#field-mode"))
-    check("ebay form offers a mode select", has_mode)
-    mode_opts = (
-        pg.eval_on_selector("#field-mode", "e=>Array.from(e.options).map(o=>o.value)")
-        if has_mode
-        else []
+    check(
+        "field opens on focus", not js(pg, "document.querySelector('#field-client_id').readOnly")
+    )
+    check("ebay form offers a mode select", visible(pg, "#field-mode"))
+    mode_opts = js(
+        pg, "Array.from(document.querySelector('#field-mode').options).map(o => o.value)"
     )
     check("ebay mode offers api and browser", set(mode_opts) >= {"", "api", "browser"}, mode_opts)
-    check(
-        "ebay mode explains the tradeoff",
-        "no keys" in (pg.eval_on_selector("#field-mode ~ .form-help", "e=>e.textContent") or ""),
-    )
+    check("ebay mode explains the tradeoff", "no keys" in field_help("mode"))
     check(
         "ebay keys are optional",
-        not pg.eval_on_selector(
-            "[data-key='client_id']",
-            "e=>!!e.closest('.form-field').querySelector('.required')",
+        not js(
+            pg,
+            "!!document.querySelector('[data-key=client_id]').closest('.form-field').querySelector('.required')",
         ),
     )
-
-    # --- the result cap and the category filter. Both exist because an
-    # uncapped browser-mode search fed ~700 car-part tiles to Ollama, one
-    # 25-second rating at a time; the form has to say that out loud.
-    def field_help(key):
-        return pg.eval_on_selector(f"#field-{key} ~ .form-help", "e=>e.textContent") or ""
-
-    check("ebay form offers a listing cap", bool(pg.query_selector("#field-max_listings")))
-    cap_help = field_help("max_listings") if pg.query_selector("#field-max_listings") else ""
-    check("ebay cap states the default", "60" in cap_help, cap_help[:80])
-    check("ebay cap explains the AI cost", "AI rating" in cap_help, cap_help[:120])
-    check("ebay form offers a category id", bool(pg.query_selector("#field-category")))
-    cat_help = field_help("category") if pg.query_selector("#field-category") else ""
-    check("ebay category help gives an example id", "6001" in cat_help, cat_help[:120])
-
-    # --- adding eBay with ZERO credentials must work and land enabled ---
+    check("ebay form offers a listing cap", visible(pg, "#field-max_listings"))
+    cap_help = field_help("max_listings")
+    check("ebay cap states the default", "60" in cap_help)
+    check("ebay cap explains the AI cost", "AI rating" in cap_help)
+    check("ebay form offers a category id", visible(pg, "#field-category"))
+    check("ebay category help gives an example id", "6001" in field_help("category"))
     pg.click("#form-save")
-    pg.wait_for_timeout(1800)
-    buf0 = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
+    pg.wait_for_timeout(1500)
+    buf0 = cm_value(pg)
+    seg0 = segment(buf0, "[marketplace.ebay]")
     check("keyless ebay add lands a section", "[marketplace.ebay]" in buf0)
-    seg0 = buf0.split("[marketplace.ebay]")[1][:400] if "[marketplace.ebay]" in buf0 else ""
     check("keyless ebay add carries market_type", 'market_type = "ebay"' in seg0, seg0[:120])
-    check("keyless ebay add starts enabled", "enabled = true" in seg0, seg0[:120])
-    check("keyless ebay add writes no client_id", "client_id" not in seg0, seg0[:120])
+    check("keyless ebay add starts enabled", "enabled = true" in seg0)
+    check("keyless ebay add writes no client_id", "client_id" not in seg0)
     check(
         "keyless ebay add persisted to disk",
-        pg.eval_on_selector("#save-btn", "e=>e.disabled"),
-        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
+        js(pg, "document.querySelector('#save-btn').disabled"),
+        pg.text_content("#editor-status")[:80],
     )
-    ebay_card = (
-        pg.eval_on_selector(
-            ".set:has([data-edit-section='marketplace.ebay']) .d", "e=>e.textContent"
-        )
-        or ""
-    )
-    check("ebay card reports browser mode", "browser" in ebay_card.lower(), ebay_card[:80])
-    check(
-        "ebay card claims no key needed", "no developer key" in ebay_card.lower(), ebay_card[:80]
-    )
-    # restore before the keyed variant, so the section name is free again
-    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
-    pg.wait_for_timeout(700)
-    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
-        pg.click("#save-btn")
-        pg.wait_for_timeout(1500)
-    # ...and the snapshot may itself carry an eBay section.
+    ebay_row = pg.text_content("#sources-page [data-edit-section='marketplace.ebay']") or ""
+    check("ebay row reports browser mode", "browser" in ebay_row.lower(), ebay_row[:80])
+    check("ebay row claims no key needed", "no developer key" in ebay_row.lower())
+    restore(pg, snapshot)
     drop_ebay_section()
-
-    # --- the same add WITH credentials still works, and stays enabled too ---
-    pg.click(".set.avail [data-setup-marketplace='ebay']")
-    pg.wait_for_timeout(600)
+    pg.click("#sources-page [data-setup-marketplace='ebay']")
+    pg.wait_for_timeout(500)
     pg.click("#field-client_id")
     pg.fill("#field-client_id", "${EBAY_CLIENT_ID}")
     pg.click("#field-client_secret")
     pg.fill("#field-client_secret", "${EBAY_CLIENT_SECRET}")
     pg.click("#form-save")
-    pg.wait_for_timeout(1800)
-    buf = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
-    seg_ok = "[marketplace.ebay]" in buf and 'market_type = "ebay"' in buf
-    check("added section carries market_type", seg_ok)
+    pg.wait_for_timeout(1500)
+    buf = cm_value(pg)
     check(
-        "keyed ebay add starts enabled",
-        "enabled = true" in buf.split("[marketplace.ebay]")[1][:400],
+        "keyed ebay add carries market_type",
+        'market_type = "ebay"' in segment(buf, "[marketplace.ebay]"),
     )
-    ebay_card2 = (
-        pg.eval_on_selector(
-            ".set:has([data-edit-section='marketplace.ebay']) .d", "e=>e.textContent"
-        )
-        or ""
-    )
-    check("keyed ebay card reports API mode", "api" in ebay_card2.lower(), ebay_card2[:80])
-    # The add must have PERSISTED (save-btn disabled = buffer==disk); a
-    # validation rejection here is the bug this block exists to catch.
-    check(
-        "ebay add persisted to disk",
-        pg.eval_on_selector("#save-btn", "e=>e.disabled"),
-        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:80],
-    )
-    # restore: put the snapshot back and save, leaving disk exactly as found
-    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
-    pg.wait_for_timeout(700)
-    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
-        pg.click("#save-btn")
-        pg.wait_for_timeout(1500)
-    check("disk restored after setup test", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+    check("keyed ebay add starts enabled", "enabled = true" in segment(buf, "[marketplace.ebay]"))
+    ebay_row2 = pg.text_content("#sources-page [data-edit-section='marketplace.ebay']") or ""
+    check("keyed ebay row reports API mode", "api" in ebay_row2.lower(), ebay_row2[:80])
+    check("ebay add persisted to disk", js(pg, "document.querySelector('#save-btn').disabled"))
+    check("disk restored after setup test", restore(pg, snapshot))
+    pg.wait_for_timeout(400)
 
-    # --- every configured section's form opens, renders, and is sane ---
-    edit_targets = pg.eval_on_selector_all(
-        "[data-edit-section]", "e=>e.map(x=>x.dataset.editSection)"
+    # ---------- every configured section's form opens ----------
+    edit_targets = js(
+        pg,
+        "Array.from(document.querySelectorAll('#sources-page [data-edit-section]')).map(x => x.dataset.editSection).filter((v, i, a) => a.indexOf(v) === i)",
     )
     for name in edit_targets:
-        pg.click(f"[data-edit-section='{name}']")
-        pg.wait_for_timeout(500)
-        modal_open = not pg.eval_on_selector("#form-modal", "e=>e.classList.contains('hidden')")
-        nfields = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+        pg.click(f"#sources-page [data-edit-section='{name}']")
+        pg.wait_for_timeout(450)
+        modal_open = visible(pg, "#form-modal")
+        nfields = js(pg, "document.querySelectorAll('#section-form [data-key]').length")
         if name == "marketplace.facebook":
-            # Mapping/distance settings must be reachable from the UI, not
-            # only by hand-editing TOML.
             pg.click(".form-tab-bar .form-tab:nth-child(2)")
-            pg.wait_for_timeout(350)
-            has_home = bool(pg.query_selector("#field-home_location"))
+            pg.wait_for_timeout(300)
             check(
                 "home_location exposed in settings UI",
-                has_home,
+                visible(pg, "#field-home_location"),
                 (
-                    pg.eval_on_selector("#field-home_location", "e=>e.value")
-                    if has_home
+                    pg.input_value("#field-home_location")
+                    if visible(pg, "#field-home_location")
                     else "MISSING"
                 ),
             )
-            check(
-                "facebook form exposes request_delay",
-                bool(pg.query_selector("#field-request_delay")),
-            )
-            check(
-                "facebook form exposes block_cooldown",
-                bool(pg.query_selector("#field-block_cooldown")),
-            )
-        hint = pg.eval_on_selector("#form-modal-hint", "e=>e.hidden ? '' : e.textContent") or ""
+            check("facebook form exposes request_delay", visible(pg, "#field-request_delay"))
+            check("facebook form exposes block_cooldown", visible(pg, "#field-block_cooldown"))
+        hint = js(
+            pg,
+            "document.querySelector('#form-modal-hint').hidden ? '' : document.querySelector('#form-modal-hint').textContent",
+        )
         check(
             f"form opens: {name}",
             modal_open and (nfields > 0 or "No form" in hint),
             f"{nfields} fields",
         )
-        if name.startswith("marketplace.") and nfields:
-            tab = pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent") or ""
-            kind = name.split(".")[1]
-            if kind != "facebook":
-                check(f"tab label not facebook: {name}", "Facebook" not in tab, tab)
+        if name.startswith("marketplace.") and nfields and name.split(".")[1] != "facebook":
+            check(
+                f"tab label not facebook: {name}",
+                "Facebook" not in (pg.text_content(".form-tab-bar .form-tab") or ""),
+            )
         pg.click("#form-cancel")
-        pg.wait_for_timeout(250)
+        pg.wait_for_timeout(200)
 
-    # item modals: both tabs render fields for every item card
-    item_names = pg.eval_on_selector_all(".icard", "e=>e.map(x=>x.dataset.section)")
-    for name in item_names[:2]:  # two representatives keep the run fast
-        # Edit lives in the card body, hidden until the card is expanded.
-        if not pg.eval_on_selector(
-            f".icard[data-section='{name}']", "e=>e.classList.contains('open')"
-        ):
-            pg.click(f".icard[data-section='{name}'] .ihead")
-            pg.wait_for_timeout(350)
-        pg.click(f".icard[data-section='{name}'] [data-act=edit]")
-        pg.wait_for_timeout(450)
-        left = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+    # item modals: both tabs render fields for two representatives
+    go(pg, "items")
+    for name in item_rows[:2]:
+        open_item(pg, name)
+        pg.click("#items-page [data-act=edit]")
+        pg.wait_for_timeout(400)
+        left = js(pg, "document.querySelectorAll('#section-form [data-key]').length")
         pg.click(".form-tab-bar .form-tab:nth-child(2)")
-        pg.wait_for_timeout(350)
-        right = pg.eval_on_selector_all("#section-form [data-key]", "e=>e.length")
+        pg.wait_for_timeout(300)
+        right = js(pg, "document.querySelectorAll('#section-form [data-key]').length")
         check(f"item modal tabs: {name}", left > 0 and right > 0, f"L{left}/R{right}")
         pg.click("#form-cancel")
-        pg.wait_for_timeout(250)
-        pg.click(f".icard[data-section='{name}'] .ihead")  # collapse back
-        pg.wait_for_timeout(250)
+        pg.wait_for_timeout(200)
+        pg.click("#items-back")
+        pg.wait_for_timeout(200)
 
     # depop + poshmark setup flows: labeled correctly, save carries market_type
+    go(pg, "sources")
     for kind, label in (("depop", "Depop"), ("poshmark", "Poshmark")):
-        pg.click(f".set.avail [data-setup-marketplace='{kind}']")
+        pg.click(f"#sources-page [data-setup-marketplace='{kind}']")
         pg.wait_for_timeout(500)
-        tab = pg.eval_on_selector(".form-tab-bar .form-tab", "e=>e.textContent") or "(no tabs)"
-        check(f"setup tab: {kind}", label in tab, tab)
         check(
-            f"setup name prefilled: {kind}",
-            pg.eval_on_selector("#add-section-name", "e=>e.value") == kind,
+            f"setup tab: {kind}",
+            label in (pg.text_content(".form-tab-bar .form-tab") or "(no tabs)"),
         )
+        check(f"setup name prefilled: {kind}", pg.input_value("#add-section-name") == kind)
         pg.click("#form-save")
         pg.wait_for_timeout(1200)
-        buf2 = pg.evaluate("document.querySelector('.CodeMirror').CodeMirror.getValue()")
+        buf2 = cm_value(pg)
         check(
             f"setup saved with market_type: {kind}",
             f"[marketplace.{kind}]" in buf2 and f'market_type = "{kind}"' in buf2,
         )
-    # restore disk to the snapshot after all setup writes
-    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
-    pg.wait_for_timeout(700)
-    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
-        pg.click("#save-btn")
-        pg.wait_for_timeout(1500)
-    check("disk restored after setup sweep", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
+    check("disk restored after setup sweep", restore(pg, snapshot))
+    pg.wait_for_timeout(400)
 
     # ---------- provider form: header switch, boolean enabled, comma-safe text ----------
-    def fb_seg():
-        return pg.evaluate(
-            "document.querySelector('.CodeMirror').CodeMirror.getValue()"
-            ".split('[marketplace.facebook]')[1].split(String.fromCharCode(10)+'[')[0]"
-        )
-
-    pg.click("[data-edit-section='marketplace.facebook']")
-    pg.wait_for_timeout(600)
+    pg.click("#sources-page [data-edit-section='marketplace.facebook']")
+    pg.wait_for_timeout(500)
     check(
         "enabled switch lives in the modal header",
-        bool(pg.query_selector("#form-modal-toggle input[data-key=enabled]"))
-        and not pg.eval_on_selector("#form-modal-toggle", "e=>e.hidden"),
+        visible(pg, "#form-modal-toggle input[data-key=enabled]")
+        or (
+            js(pg, "!!document.querySelector('#form-modal-toggle input[data-key=enabled]')")
+            and not js(pg, "document.querySelector('#form-modal-toggle').hidden")
+        ),
     )
     check(
         "enabled is gone from the field grid",
-        pg.eval_on_selector_all("#section-form [data-key=enabled]", "e=>e.length") == 0,
+        js(pg, "document.querySelectorAll('#section-form [data-key=enabled]').length") == 0,
     )
-    # A comma in a plain text field is punctuation. Splitting it wrote
-    # home_location = ["Asheboro", "NC"], which the validator rejects.
     pg.click(".form-tab-bar .form-tab:nth-child(2)")
-    pg.wait_for_timeout(350)
+    pg.wait_for_timeout(300)
     pg.click("#field-home_location")
     pg.fill("#field-home_location", "Asheboro, NC")
-    # ...while a genuinely list-valued field with commas must still split.
     pg.click("#field-search_city")
     pg.fill("#field-search_city", "asheboro, greensboro")
     pg.click("#form-save")
-    pg.wait_for_timeout(1800)
-    seg_fb = fb_seg()
-
-    def line_for(seg, key):
-        hits = [ln for ln in seg.splitlines() if ln.strip().startswith(key)]
-        return hits[0] if hits else ""
-
+    pg.wait_for_timeout(1500)
+    seg_fb = segment(cm_value(pg), "[marketplace.facebook]")
     loc_line = line_for(seg_fb, "home_location")
     check(
         "comma text stays a quoted string",
@@ -940,141 +1413,118 @@ with sync_playwright() as p:
     )
     check(
         "comma-text save persisted (config still valid)",
-        pg.eval_on_selector("#save-btn", "e=>e.disabled"),
-        pg.eval_on_selector("#editor-status", "e=>e.textContent")[:90],
+        js(pg, "document.querySelector('#save-btn').disabled"),
+        pg.text_content("#editor-status")[:90],
     )
-    # Restore before touching enabled, so a failure below cannot leave two
-    # cities on disk.
-    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
-    pg.wait_for_timeout(700)
-    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
-        pg.click("#save-btn")
-        pg.wait_for_timeout(1500)
-    check("disk restored after comma test", pg.eval_on_selector("#save-btn", "e=>e.disabled"))
-
-    # `enabled` must serialize as a bare boolean, not the string "true".
-    # Exercised on eBay: switching Facebook off, even briefly, is not worth it.
-    def ebay_seg():
-        return pg.evaluate(
-            "document.querySelector('.CodeMirror').CodeMirror.getValue()"
-            ".split('[marketplace.ebay]')[1].split(String.fromCharCode(10)+'[')[0]"
-        )
-
-    if pg.query_selector("[data-edit-section='marketplace.ebay']"):
-        pg.click("[data-edit-section='marketplace.ebay']")
-        pg.wait_for_timeout(600)
+    check("disk restored after comma test", restore(pg, snapshot))
+    pg.wait_for_timeout(400)
+    if visible(pg, "#sources-page [data-edit-section='marketplace.ebay']"):
+        pg.click("#sources-page [data-edit-section='marketplace.ebay']")
+        pg.wait_for_timeout(500)
         pg.eval_on_selector(
             "#form-modal-toggle input[data-key=enabled]",
-            "e=>{ e.checked = false; e.dispatchEvent(new Event('change')); }",
+            "e => { e.checked = false; e.dispatchEvent(new Event('change')); }",
         )
         pg.click("#form-save")
-        pg.wait_for_timeout(1800)
-        en_line = line_for(ebay_seg(), "enabled")
-        check(
-            "enabled writes a bare boolean",
-            "false" in en_line and '"' not in en_line,
-            en_line,
-        )
-        pg.click("[data-edit-section='marketplace.ebay']")
-        pg.wait_for_timeout(600)
+        pg.wait_for_timeout(1500)
+        en_line = line_for(segment(cm_value(pg), "[marketplace.ebay]"), "enabled")
+        check("enabled writes a bare boolean", "false" in en_line and '"' not in en_line, en_line)
+        pg.click("#sources-page [data-edit-section='marketplace.ebay']")
+        pg.wait_for_timeout(500)
         check(
             "header switch reflects the saved false",
-            not pg.eval_on_selector("#form-modal-toggle input[data-key=enabled]", "e=>e.checked"),
+            not js(
+                pg, "document.querySelector('#form-modal-toggle input[data-key=enabled]').checked"
+            ),
         )
         pg.eval_on_selector(
             "#form-modal-toggle input[data-key=enabled]",
-            "e=>{ e.checked = true; e.dispatchEvent(new Event('change')); }",
+            "e => { e.checked = true; e.dispatchEvent(new Event('change')); }",
         )
         pg.click("#form-save")
-        pg.wait_for_timeout(1800)
-        en_line2 = line_for(ebay_seg(), "enabled")
+        pg.wait_for_timeout(1500)
+        en_line2 = line_for(segment(cm_value(pg), "[marketplace.ebay]"), "enabled")
         check(
             "enabled toggles back to a bare true",
             "true" in en_line2 and '"' not in en_line2,
             en_line2,
         )
-    pg.evaluate("(s) => document.querySelector('.CodeMirror').CodeMirror.setValue(s)", snapshot)
-    pg.wait_for_timeout(700)
-    if not pg.eval_on_selector("#save-btn", "e=>e.disabled"):
-        pg.click("#save-btn")
-        pg.wait_for_timeout(1500)
-    check(
-        "disk restored after provider-form test", pg.eval_on_selector("#save-btn", "e=>e.disabled")
-    )
-    pg.screenshot(path="/tmp/qa/6-forms.png")
+    else:
+        check("enabled boolean (no ebay section on disk)", True, "skipped")
+    check("disk restored after provider-form test", restore(pg, snapshot))
 
-    # TOML tab roundtrip
-    pg.click("#tab-toml")
+    # ---------- TOML view round-trip + help levels ----------
+    pg.click("#sources-page [data-config-mode=toml]")
     pg.wait_for_timeout(500)
     check(
-        "TOML tab shows editor",
-        pg.eval_on_selector("#config-toml-view", "e=>getComputedStyle(e).display") != "none",
+        "TOML mode switches to the editor",
+        js(pg, "window.AIMM.state.view") == "items"
+        and visible(pg, "#toml-pane")
+        and not visible(pg, "#items-page"),
     )
-    pg.click("#tab-form")
-    pg.wait_for_timeout(400)
     check(
-        "back to Form",
-        pg.eval_on_selector("#config-form-view", "e=>getComputedStyle(e).display") != "none",
+        "TOML editor shows the config with section gutter buttons",
+        js(pg, "document.querySelectorAll('.section-btn').length") >= 3,
     )
-
-    # help levels
-    pg.click("#help-seg button[data-help=guided]")
+    pg.screenshot(path="/tmp/qa/toml-desktop.png")
+    pg.click("[data-config-mode=form]:visible")
     pg.wait_for_timeout(300)
+    check("back to Form", visible(pg, "#items-page") and not visible(pg, "#toml-pane"))
+    go(pg, "sources")
+    pg.click("#help-seg [data-help=guided]")
+    go(pg, "items")
+    open_item(pg, S)
     check(
         "guided shows examples",
-        pg.eval_on_selector(".fieldhelp .ex", "e=>getComputedStyle(e).display") == "block",
+        js(pg, "getComputedStyle(document.querySelector('.fieldhelp .ex')).display") == "block",
     )
-    pg.click("#help-seg button[data-help=off]")
-    pg.wait_for_timeout(300)
+    go(pg, "sources")
+    pg.click("#help-seg [data-help=off]")
+    go(pg, "items")
+    open_item(pg, S)
     check(
         "help off hides",
-        pg.eval_on_selector(".fieldhelp", "e=>getComputedStyle(e).display") == "none",
+        js(pg, "getComputedStyle(document.querySelector('.fieldhelp')).display") == "none",
     )
-    pg.click("#help-seg button[data-help=hints]")
-    pg.wait_for_timeout(200)
+    go(pg, "sources")
+    pg.click("#help-seg [data-help=hints]")
+    check("help level persists", js(pg, "localStorage.getItem('aimm.helpLevel')") == "hints")
 
-    # ---------- logs ----------
-    pg.click("#app-nav button[data-appview=logs]")
-    pg.wait_for_timeout(600)
-    check("logs render", pg.eval_on_selector_all("#logs > *", "e=>e.length") >= 0)
-    check(
-        "log buttons",
-        bool(pg.query_selector("#log-download")) and bool(pg.query_selector("#log-clear")),
-    )
-    pg.click(".level-chips [data-level=ERROR]")
-    pg.wait_for_timeout(300)
-    pg.click(".level-chips [data-level=ALL]")
-    pg.wait_for_timeout(200)
-    pg.screenshot(path="/tmp/qa/3-logs.png")
-
-    # ---------- status ----------
-    pg.click("#app-nav button[data-appview=status]")
+    # =====================================================================
+    # Status + logs
+    # =====================================================================
+    go(pg, "status")
     pg.wait_for_timeout(1500)
     check(
-        "status tiles",
-        pg.eval_on_selector_all(".stile", "e=>e.length") == 4,
-        pg.eval_on_selector_all(".stile .t", "e=>e.map(x=>x.textContent)"),
+        "status groups render", js(pg, "document.querySelectorAll('#status-body .g').length") >= 2
     )
-    check("env lines", pg.eval_on_selector_all(".envline", "e=>e.length") > 0)
+    check("monitor row present", "Monitor" in (pg.text_content("#status-body") or ""))
+    check(
+        "pause / search now buttons",
+        visible(pg, "#status-search") and js(pg, "!!document.querySelector('#status-pause')"),
+    )
+    check("env lines", js(pg, "document.querySelectorAll('#status-body .envline').length") > 0)
+    check(
+        "session group: log stream state", "Log stream" in (pg.text_content("#status-body") or "")
+    )
     pg.click("#status-refresh")
     pg.wait_for_timeout(800)
     check(
-        "status refresh", "updated" in pg.eval_on_selector("#status-updated", "e=>e.textContent")
+        "status refresh keeps rendering",
+        js(pg, "document.querySelectorAll('#status-body .g').length") >= 2,
     )
     check(
-        "status tile count unchanged by block work",
-        pg.eval_on_selector_all(".stile", "e=>e.length") == 4,
+        "ws status text",
+        "streaming" in (pg.text_content("#ws-status") or ""),
+        pg.text_content("#ws-status"),
     )
-    pg.screenshot(path="/tmp/qa/4-status.png")
+    pg.screenshot(path="/tmp/qa/status-desktop.png", full_page=True)
 
     # ---------- block state: rendered from a stubbed payload ----------
-    # Provoking a real Facebook block to test the UI is not an option, so the
-    # renderers are asserted directly against the shape /api/monitor/state
-    # publishes. window.__aimm exists for exactly this.
-    block_probe = pg.evaluate(
+    block_probe = js(
+        pg,
         """() => {
           const A = window.__aimm;
-          if (!A) return { missing: true };
           const now = 1000;
           const info = { available: true, blocked: { facebook: {
             marketplace: "facebook", reason: "page title: Temporarily Blocked",
@@ -1092,18 +1542,16 @@ with sync_playwright() as p:
             cadence: [A.parseDuration("2h"), A.parseDuration(1800), A.parseDuration("90m"),
                       A.parseDuration("bogus"), A.fmtCadence(7200), A.fmtCadence(2700)],
           };
-        }"""
+        }""",
     )
-    check("block renderers exposed for QA", not block_probe.get("missing"))
     check("active block detected", block_probe.get("active") == 1)
     check("expired cooldown is not shown", block_probe.get("expiredIgnored") == 0)
     check("no block reads as clear", block_probe.get("noneWhenClear") == 0)
+    chip = block_probe.get("chip") or ""
     check(
-        "chip reads 'facebook: blocked - retry HH:MM'",
-        (block_probe.get("chip") or "").startswith("facebook: blocked")
-        and ": blocked" in (block_probe.get("chip") or "")
-        and len((block_probe.get("chip") or "").split("retry ")[-1]) == 5,
-        block_probe.get("chip"),
+        "chip reads 'facebook: blocked · retry HH:MM'",
+        chip.startswith("facebook: blocked") and len(chip.split("retry ")[-1]) == 5,
+        chip,
     )
     _bh = block_probe.get("html") or ""
     check(
@@ -1113,7 +1561,7 @@ with sync_playwright() as p:
         and "Temporarily Blocked" in _bh
         and 'data-clear-block="facebook"' in _bh
         and "strike 2" in _bh,
-        _bh[:160],
+        _bh[:120],
     )
     check("no notice when nothing is blocked", block_probe.get("emptyHtml") == "")
     check(
@@ -1121,33 +1569,307 @@ with sync_playwright() as p:
         block_probe.get("cadence") == [7200, 1800, 5400, None, "2h", "45m"],
         block_probe.get("cadence"),
     )
-
-    # ---------- header controls ----------
+    # Render the blocked state for real (stubbed monitor payload) and shoot it.
+    js(
+        pg,
+        """() => { window.AIMM.state.monitorInfo = { available: true, paused: false, activity: { state: "idle" }, started_at: Date.now()/1000 - 90000,
+        jobs: [], fb_session: {}, counters: {}, paused_persisted: false,
+        blocked: { facebook: { marketplace: "facebook", reason: "page title: Temporarily Blocked", detected_at: Date.now()/1000 - 600, until: Date.now()/1000 + 1800, strikes: 1 } } };
+        window.AIMM.renderMonitorStatus(); window.__aimm.renderStatus(); }""",
+    )
+    pg.wait_for_timeout(300)
     check(
-        "chip text",
-        bool(pg.eval_on_selector("#monitor-status", "e=>e.textContent.trim()")),
-        pg.eval_on_selector("#monitor-status", "e=>e.textContent"),
+        "header chip shows the block with retry time",
+        re.search(
+            r"⛔ facebook: blocked · retry \d\d:\d\d", pg.text_content("#monitor-status") or ""
+        )
+        is not None,
+        pg.text_content("#monitor-status"),
     )
     check(
-        "browser link", "path=ws/vnc" in (pg.eval_on_selector("#browser-btn", "e=>e.href") or "")
+        "blocked card rendered on the Status page",
+        visible(pg, "#status-body .blkrow [data-clear-block=facebook]"),
     )
-
-    # narrow viewport: deals split stacks
-    pg.set_viewport_size({"width": 860, "height": 900})
-    pg.click("#app-nav button[data-appview=deals]")
-    pg.wait_for_timeout(600)
-    cols = pg.eval_on_selector(".deals-split", "e=>getComputedStyle(e).gridTemplateColumns")
-    check("mobile stacks", " " not in cols.strip(), cols)
-    pg.set_viewport_size({"width": 1500, "height": 950})
-    pg.wait_for_timeout(400)
-
-    # config screenshot at full width for review
-    pg.click("#app-nav button[data-appview=config]")
+    pg.screenshot(path="/tmp/qa/status-blocked-desktop.png")
+    js(
+        pg,
+        """() => { window.AIMM.state.monitorInfo = { available: true, paused: true, activity: { state: "idle" }, jobs: [], fb_session: {}, counters: {}, blocked: {}, paused_persisted: true }; window.AIMM.renderMonitorStatus(); }""",
+    )
+    check("header chip shows paused", "paused" in (pg.text_content("#monitor-status") or ""))
+    js(
+        pg,
+        """() => { window.AIMM.state.monitorInfo = { available: true, paused: false, activity: { state: "searching", item: "gpu" }, jobs: [], fb_session: {}, counters: {}, blocked: {}, paused_persisted: false }; window.AIMM.renderMonitorStatus(); }""",
+    )
+    check(
+        "header chip shows 'searching <item>'",
+        "searching gpu" in (pg.text_content("#monitor-status") or ""),
+    )
+    pg.click("#status-refresh")
     pg.wait_for_timeout(800)
-    pg.click(S + " .ihead")
-    pg.wait_for_timeout(500)
-    pg.screenshot(path="/tmp/qa/5-config-final.png", full_page=True)
+    check("pause button hidden without an attached monitor", not visible(pg, "#pause-btn"))
 
+    # ---------- logs ----------
+    check("log buttons", visible(pg, "#log-download") and visible(pg, "#log-clear"))
+    n_logs = js(pg, "document.querySelectorAll('#logs .log-row').length")
+    js(
+        pg,
+        """() => { const s = window.AIMM.state; s.records = s.records.concat([
+        { id: 900001, level: "INFO", iso_time: "12:00:00", time: Date.now()/1000, message: "qa info line", logger: "qa", location: "qa:1", extra: { kind: "search_summary", item: "qa-item" } },
+        { id: 900002, level: "ERROR", iso_time: "12:00:01", time: Date.now()/1000, message: "qa error line", logger: "qa", location: "qa:2", extra: { kind: "ai_eval", item: "qa-item", score: 5 } },
+        { id: 900003, level: "WARNING", iso_time: "12:00:02", time: Date.now()/1000, message: "qa warning line", logger: "qa", location: "qa:3" } ]);
+        window.AIMM.emit("logs"); }""",
+    )
+    pg.wait_for_timeout(300)
+    check(
+        "logs render", js(pg, "document.querySelectorAll('#logs .log-row').length") == n_logs + 3
+    )
+    pg.click(".level-chips [data-level=ERROR]")
+    pg.wait_for_timeout(200)
+    check(
+        "level filter",
+        js(
+            pg,
+            "Array.from(document.querySelectorAll('#logs .log-row')).every(r => r.classList.contains('level-ERROR') || r.classList.contains('level-CRITICAL'))",
+        ),
+    )
+    pg.click(".level-chips [data-level=ALL]")
+    pg.click(".kind-chips [data-kind=ai_eval]")
+    pg.wait_for_timeout(200)
+    check(
+        "kind filter",
+        js(pg, "document.querySelectorAll('#logs .log-row').length") >= 1
+        and js(
+            pg,
+            "Array.from(document.querySelectorAll('#logs .kind-badge')).every(b => b.classList.contains('kind-ai_eval'))",
+        ),
+    )
+    pg.click(".kind-chips [data-kind='']")
+    pg.select_option("#item-filter", "qa-item")
+    pg.wait_for_timeout(200)
+    check("item filter", js(pg, "document.querySelectorAll('#logs .log-row').length") == 2)
+    pg.select_option("#score-filter", "5")
+    pg.wait_for_timeout(200)
+    check("score filter", js(pg, "document.querySelectorAll('#logs .log-row').length") == 1)
+    pg.select_option("#score-filter", "")
+    pg.select_option("#item-filter", "")
+    pg.fill("#log-filter", "qa warning")
+    pg.wait_for_timeout(200)
+    check("text filter", js(pg, "document.querySelectorAll('#logs .log-row').length") == 1)
+    pg.click("#logs .log-row")
+    pg.wait_for_timeout(200)
+    check("log row expands with details", visible(pg, "#logs .log-detail"))
+    pg.fill("#log-filter", "")
+    pg.click("#log-clear")
+    pg.wait_for_timeout(200)
+    check(
+        "clear empties the tail", js(pg, "document.querySelectorAll('#logs .log-row').length") == 0
+    )
+    pg.screenshot(path="/tmp/qa/logs-desktop.png")
+
+    # ---------- layout guards (desktop) ----------
+    for view in ("review", "items", "sources", "status"):
+        go(pg, view)
+        pg.wait_for_timeout(300)
+        check(f"no horizontal overflow at 1440: {view}", overflow(pg) <= 1, f"{overflow(pg)}px")
+    ctx.close()
+
+    # =====================================================================
+    # Phone pass (390x844): tabs, swipe, detail, lists, settings screens
+    # =====================================================================
+    ctx = b.new_context(
+        viewport={"width": 390, "height": 844},
+        device_scale_factor=2,
+        is_mobile=True,
+        has_touch=True,
+    )
+    pg = ctx.new_page()
+    pg.on("console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", ""))))
+    pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
+    pg.goto(BASE + "/", wait_until="load")
+    pg.wait_for_timeout(800)
+    pg.screenshot(path="/tmp/qa/login-mobile.png")
+    pg.fill("input[name=username]", "t@e.com")
+    pg.fill("input[name=password]", "pw")
+    pg.click("#login-submit")
+    pg.wait_for_timeout(3500)
+    check("mobile: login", visible(pg, "#app"))
+    check(
+        "mobile: bottom tab bar",
+        visible(pg, "#tabs") and js(pg, "document.querySelectorAll('#tabs a').length") == 4,
+    )
+    check("mobile: top nav hidden", not visible(pg, "#topnav"))
+    check(
+        "mobile: one card, actions in the thumb zone",
+        visible(pg, "#stack .tcard.top")
+        and visible(pg, "#act-keep")
+        and visible(pg, "#act-dismiss"),
+    )
+    check("mobile: swipe hint", "Swipe" in (pg.text_content("#swipehint") or ""))
+    check(
+        "mobile: filters hidden behind the filter button",
+        not visible(pg, "#review-filters") and visible(pg, "#filter-btn"),
+    )
+    pg.click("#filter-btn")
+    pg.wait_for_timeout(200)
+    check(
+        "mobile: filter drawer opens", visible(pg, "#review-filters") and visible(pg, "#deal-sort")
+    )
+    pg.click("#filter-btn")
+    pg.wait_for_timeout(200)
+    pg.screenshot(path="/tmp/qa/queue-mobile.png")
+
+    def targets_ok(selector, minimum=44):
+        return js(
+            pg,
+            f"Array.from(document.querySelectorAll({json.dumps(selector)})).filter(e => e.offsetParent !== null).every(e => e.getBoundingClientRect().height >= {minimum} && e.getBoundingClientRect().width >= {minimum})",
+        )
+
+    check("touch targets: tabs >= 44px", targets_ok("#tabs a"))
+    check("touch targets: card actions >= 44px", targets_ok("#acts .rb"))
+    check(
+        "touch targets: segmented control + icon buttons >= 38/44px",
+        targets_ok("#mode-seg button", 38) and targets_ok("#filter-btn"),
+    )
+    check("no horizontal overflow at 390: queue", overflow(pg) <= 1, f"{overflow(pg)}px")
+
+    km = js(pg, "document.querySelector('#stack .tcard.top').dataset.key")
+    x, y, w, h = pg.eval_on_selector(
+        "#stack .tcard.top",
+        "e => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }",
+    )
+    cx, cy = x + w / 2, y + h / 2
+    pg.mouse.move(cx, cy)
+    pg.mouse.down()
+    for i in range(1, 9):
+        pg.mouse.move(cx + w * 0.5 * i / 8, cy, steps=2)
+        pg.wait_for_timeout(30)
+    pg.screenshot(path="/tmp/qa/swipe-mobile.png")
+    check(
+        "mobile: KEEP stamp visible mid-swipe",
+        js(
+            pg,
+            "parseFloat(document.querySelector('#stack .tcard.top .stamp.keep').style.opacity) >= 0.9",
+        ),
+    )
+    pg.mouse.up()
+    pg.wait_for_timeout(1300)
+    rm = api_row(pg, km)
+    check("mobile: swipe right keeps", rm and rm["kept"] is True)
+    pg.click("#act-undo")
+    pg.wait_for_timeout(1200)
+    rm = api_row(pg, km)
+    check("mobile: undo restores", rm and not rm["kept"] and not rm["reviewed_at"])
+    pg.click("#act-details")
+    pg.wait_for_timeout(600)
+    check(
+        "mobile: detail is a full screen (tabs hidden)",
+        visible(pg, "#detail-pane")
+        and not visible(pg, "#tabs")
+        and not visible(pg, "#queue-pane"),
+    )
+    check(
+        "touch targets: detail action bar >= 44px",
+        targets_ok("#detail-pane .actbar .btn") and targets_ok("#detail-pane .rate5 button"),
+    )
+    check("no horizontal overflow at 390: detail", overflow(pg) <= 1, f"{overflow(pg)}px")
+    pg.screenshot(path="/tmp/qa/detail-mobile.png", full_page=True)
+    pg.click("#detail-back")
+    pg.wait_for_timeout(300)
+    check("mobile: back returns to the queue", visible(pg, "#queue-pane") and visible(pg, "#tabs"))
+    pg.click("#act-keep")
+    pg.wait_for_timeout(1200)
+    pg.click("#mode-seg [data-mode=reviewed]")
+    pg.wait_for_timeout(400)
+    check(
+        "mobile: Reviewed list with chips",
+        visible(pg, "#list-pane")
+        and js(pg, "document.querySelectorAll('#list-pane [data-rchip]').length") == 4
+        and visible(pg, f"#list-pane .lrow[data-key={json.dumps(km)}]"),
+    )
+    pg.screenshot(path="/tmp/qa/reviewed-mobile.png", full_page=True)
+    pg.wait_for_timeout(500)  # a full-page shot resizes the viewport; let the re-render settle
+    rx, ry, rw, rh = pg.eval_on_selector(
+        f"#list-pane .lrow[data-key={json.dumps(km)}]",
+        "e => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }",
+    )
+    pg.mouse.move(rx + rw * 0.7, ry + rh / 2)
+    pg.mouse.down()
+    pg.mouse.move(rx + rw * 0.7 - 90, ry + rh / 2, steps=6)
+    pg.mouse.up()
+    pg.wait_for_timeout(300)
+    check(
+        "mobile: swipe a row left reveals Undo",
+        js(
+            pg,
+            f"document.querySelector('#list-pane .lrow[data-key={json.dumps(km)}]').classList.contains('revealed')",
+        ),
+    )
+    pg.click(f"#list-pane .lrow[data-key={json.dumps(km)}] .undo")
+    pg.wait_for_timeout(1200)
+    rm = api_row(pg, km)
+    check("mobile: row Undo re-flags", rm and not rm["kept"] and not rm["reviewed_at"])
+    pg.click("#mode-seg [data-mode=all]")
+    pg.wait_for_timeout(400)
+    check(
+        "mobile: All view uses feed cards",
+        js(pg, "document.querySelectorAll('#list-pane .fcard').length") >= 3,
+    )
+    check("no horizontal overflow at 390: all", overflow(pg) <= 1, f"{overflow(pg)}px")
+    pg.screenshot(path="/tmp/qa/all-mobile.png", full_page=True)
+    pg.click("#list-pane .fcard")
+    pg.wait_for_timeout(400)
+    check("mobile: feed card opens detail", visible(pg, "#detail-pane"))
+    pg.click("#detail-back")
+    pg.click("#mode-seg [data-mode=queue]")
+
+    go(pg, "items")
+    pg.wait_for_timeout(600)
+    check(
+        "mobile: items list",
+        js(pg, "document.querySelectorAll('#items-page [data-open-item]').length") >= 4,
+    )
+    check("touch targets: list rows >= 44px", targets_ok("#items-page .g .r"))
+    check("no horizontal overflow at 390: items", overflow(pg) <= 1, f"{overflow(pg)}px")
+    pg.screenshot(path="/tmp/qa/items-mobile.png", full_page=True)
+    open_item(pg, S)
+    check(
+        "mobile: item editor with grouped lists",
+        js(pg, "document.querySelectorAll('#items-page .g').length") >= 5
+        and visible(pg, "#items-page .tog[data-toggle=enabled]"),
+    )
+    check("no horizontal overflow at 390: item editor", overflow(pg) <= 1, f"{overflow(pg)}px")
+    pg.screenshot(path="/tmp/qa/item-edit-mobile.png", full_page=True)
+    pg.click("#items-page [data-act=edit]")
+    pg.wait_for_timeout(400)
+    check("mobile: form modal is a bottom sheet", visible(pg, "#form-modal"))
+    pg.screenshot(path="/tmp/qa/modal-mobile.png")
+    pg.click("#form-cancel")
+    pg.click("[data-config-mode=toml]:visible")
+    pg.wait_for_timeout(400)
+    check("mobile: TOML view", visible(pg, "#toml-pane"))
+    pg.screenshot(path="/tmp/qa/toml-mobile.png")
+    pg.click("[data-config-mode=form]:visible")
+    go(pg, "sources")
+    pg.wait_for_timeout(600)
+    check(
+        "mobile: sources grouped list",
+        js(pg, "document.querySelectorAll('#sources-page .g').length") >= 3,
+    )
+    check("no horizontal overflow at 390: sources", overflow(pg) <= 1, f"{overflow(pg)}px")
+    pg.screenshot(path="/tmp/qa/sources-mobile.png", full_page=True)
+    go(pg, "status")
+    pg.wait_for_timeout(1200)
+    check(
+        "mobile: status grouped list + logs",
+        js(pg, "document.querySelectorAll('#status-body .g').length") >= 2
+        and visible(pg, "#logs"),
+    )
+    check("no horizontal overflow at 390: status", overflow(pg) <= 1, f"{overflow(pg)}px")
+    pg.screenshot(path="/tmp/qa/status-mobile.png", full_page=True)
+    pg.click("#logout-row")
+    pg.wait_for_timeout(800)
+    check("mobile: log out returns to the login screen", visible(pg, "#login-screen"))
+    ctx.close()
     b.close()
 
 # Resource-error console text omits the URL; it rides in the message location.
@@ -1159,8 +1881,11 @@ errors = [
     and "listing-image" not in m + url
     # OSM tile fetches can transiently fail without breaking the map
     and "tile.openstreetmap.org" not in m + url
+    # the router demo can be down; the UI degrades to the straight line
+    and "/api/route" not in m + url
 ]
 check("zero console errors", len(errors) == 0, errors[:3])
+check("live config.toml untouched (byte-identical)", LIVE_CONFIG.read_bytes() == _LIVE_BYTES)
 
 fails = [r for r in results if not r[1]]
 print("=" * 50)

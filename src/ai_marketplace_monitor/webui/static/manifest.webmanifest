@@ -1,0 +1,19 @@
+{
+  "name": "AI Marketplace Monitor",
+  "short_name": "AIMM",
+  "description": "Review what the marketplace monitor found: keep, dismiss, rate.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1117",
+  "theme_color": "#0e1117",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
