@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Web UI rebuilt mobile-first around a review queue: one listing at a time, swipe right to keep / left to
+  dismiss, tap for details, Queue / Reviewed / All views, keyboard triage on desktop (`J`/`K`, `→`/`←`,
+  `1`–`5`, `Enter`, `O`, `Z`, `H`, `R`, `?`), grouped-list Items / Sources / Status screens, and a web
+  app manifest so it can be pinned to a phone home screen. Every previous capability (TOML editor, section
+  forms, sources set-up, status, logs, CSV export, noVNC link) is carried over.
+
+### Added
+- `/api/listing/flag` accepts `kept`; user flags now carry `reviewed_at`, and activity rows expose both,
+  so the review queue is derived from the user's own decisions (kept, hidden, or rated).
+
 ## [0.10.2] - 2026-07-17
 
 ### Added

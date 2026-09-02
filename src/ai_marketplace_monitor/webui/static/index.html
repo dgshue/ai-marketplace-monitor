@@ -2,18 +2,26 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1117" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AIMM" />
   <title>AI Marketplace Monitor</title>
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
   <link rel="stylesheet" href="/static/vendor/codemirror.css" />
   <link rel="stylesheet" href="/static/vendor/dialog.css" />
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
   <link rel="stylesheet" href="/static/app.css" />
-  <link rel="icon" href="data:," />
 </head>
 <body>
+  <!-- ================= Login ================= -->
   <div id="login-screen" class="login-screen hidden">
-    <form id="login-form" class="login-form">
-      <h1 id="login-title">AI Marketplace Monitor</h1>
+    <form id="login-form" class="login-form" autocomplete="on">
+      <div class="login-brand"><i></i>AI Marketplace Monitor</div>
       <p id="login-subtitle" class="subtitle" hidden></p>
       <div id="login-fields">
         <label>Username
@@ -22,166 +30,219 @@
         <label>Password
           <input type="password" name="password" autocomplete="current-password" required autofocus />
         </label>
-        <button type="submit" id="login-submit">Sign in</button>
+        <button type="submit" id="login-submit" class="btn pri">Sign in</button>
       </div>
       <p id="login-error" class="error" hidden></p>
     </form>
   </div>
 
+  <!-- ================= App ================= -->
   <div id="app" class="app hidden">
-    <header class="topbar">
-      <span class="brand">AI<span class="brand-accent">MM</span></span>
-      <nav class="nav" id="app-nav">
-        <button data-appview="deals" class="on">Deals</button>
-        <button data-appview="config">Config</button>
-        <button data-appview="logs">Logs</button>
-        <button data-appview="status">Status</button>
-      </nav>
-      <div class="top-right">
-        <span id="monitor-status" class="status-chip status-warn" title="Monitor state">● starting…</span>
-        <button id="pause-btn" class="ghost small" title="Pause monitoring" hidden>⏸ Pause</button>
-        <button id="restart-btn" class="ghost small" title="Wake up and search all items now" aria-label="Search all items now">▶ Search now</button>
-        <a id="browser-btn" class="ghost small" href="/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale" target="_blank" rel="noopener" title="Open the live Chromium view (CAPTCHA / login)" hidden>Browser</a>
-        <button id="logout-btn" class="ghost small">Logout</button>
-      </div>
-    </header>
+    <!-- Desktop top navigation -->
+    <nav class="topnav" id="topnav">
+      <span class="brand"><i></i>AI Marketplace Monitor</span>
+      <button data-view="review" class="on">Review</button>
+      <button data-view="items">Items</button>
+      <button data-view="sources">Sources</button>
+      <button data-view="status">Status</button>
+      <span class="right">
+        <span id="monitor-status" class="status-chip" data-monitor-chip title="Monitor state"><i></i>starting…</span>
+        <button id="pause-btn" class="btn" hidden>Pause</button>
+        <button id="restart-btn" class="btn pri" title="Wake up and search all items now">Search now</button>
+        <a id="browser-btn" class="btn ghost" href="/vnc/vnc.html?path=ws/vnc&autoconnect=1&resize=scale" target="_blank" rel="noopener" title="Open the live Chromium view (login / 2FA / CAPTCHA)" hidden>Browser</a>
+        <button id="logout-btn" class="btn ghost">Logout</button>
+      </span>
+    </nav>
 
-    <main class="main-views">
+    <main id="main">
+      <!-- ================= Review ================= -->
+      <section id="view-review" class="view">
+        <div class="three">
+          <aside class="rail" id="rail"></aside>
+          <div class="center" id="review-center">
+            <header class="appbar" id="review-appbar">
+              <div class="top">
+                <h1>Review</h1>
+                <span class="status-chip mchip" data-monitor-chip><i></i>starting…</span>
+                <button class="ib" id="filter-btn" aria-label="Filter and sort" title="Filter and sort">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+                </button>
+              </div>
+              <div class="seg" id="mode-seg">
+                <button data-mode="queue" class="on">Queue <span class="n" id="n-queue">0</span></button>
+                <button data-mode="reviewed">Reviewed <span class="n" id="n-reviewed">0</span></button>
+                <button data-mode="all">All <span class="n" id="n-all">0</span></button>
+              </div>
+              <div class="qhead" id="qhead">
+                <span class="cnt" id="q-count">0 to review</span>
+                <span class="bar"><i id="q-bar" style="width:0%"></i></span>
+                <span class="sub" id="q-sub"></span>
+              </div>
+              <div class="today" id="today-strip"></div>
+              <div class="filters hidden" id="review-filters">
+                <div class="chips" id="item-pills"></div>
+                <div class="chips" id="verdict-chips">
+                  <button data-verdict="" class="chip on">All verdicts</button>
+                  <button data-verdict="promising" class="chip">Promising</button>
+                  <button data-verdict="notified" class="chip">Notified</button>
+                  <button data-verdict="dismissed" class="chip">Below threshold</button>
+                  <button data-verdict="hidden" class="chip" title="Listings you dismissed — still tracked">Hidden</button>
+                </div>
+                <div class="frow">
+                  <input id="activity-filter" class="inp" type="search" placeholder="Filter title / reasoning…" autocomplete="off" />
+                  <select id="deal-sort" class="inp" title="Sort listings">
+                    <option value="score">Best rated</option>
+                    <option value="myrank">My rating</option>
+                    <option value="distance">Nearest</option>
+                    <option value="newest">Newest</option>
+                  </select>
+                </div>
+                <div class="frow">
+                  <span id="activity-count" class="muted grow"></span>
+                  <button id="activity-refresh" class="btn ghost sm" title="Reload listings">↻ Refresh</button>
+                  <button id="export-csv-btn" class="btn ghost sm" title="Download every notified listing as CSV">⬇ CSV</button>
+                </div>
+              </div>
+            </header>
 
-      <!-- ============ Deals ============ -->
-      <section id="view-deals" class="appview">
-        <div id="activity-view" class="activity-view">
-          <div id="activity-summary" class="activity-summary"></div>
-          <div class="activity-toolbar">
-            <div class="verdict-chips">
-              <button data-verdict="" class="chip active">All</button>
-              <button data-verdict="promising" class="chip">Promising</button>
-              <button data-verdict="notified" class="chip">Notified</button>
-              <button data-verdict="dismissed" class="chip">Dismissed</button>
-              <button data-verdict="hidden" class="chip" title="Listings you dismissed — still tracked">Hidden</button>
+            <!-- Queue: one card at a time -->
+            <div id="queue-pane" class="wrap">
+              <div class="stack" id="stack">
+                <span class="edge l">DISMISS</span><span class="edge r">KEEP ★</span>
+              </div>
+              <div class="acts" id="acts">
+                <span class="w"><button class="rb sm" id="act-undo" aria-label="Undo" title="Undo (Z)" disabled>↶</button><span class="lbl">Undo</span></span>
+                <span class="w"><button class="rb no" id="act-dismiss" aria-label="Dismiss" title="Dismiss (← / X)">✕</button><span class="lbl">Dismiss</span></span>
+                <span class="w"><button class="rb sm" id="act-details" aria-label="Details" title="Details (Enter)">↑</button><span class="lbl">Details</span></span>
+                <span class="w"><button class="rb yes" id="act-keep" aria-label="Keep" title="Keep (→ / S)">★</button><span class="lbl">Keep</span></span>
+              </div>
+              <div class="swipehint" id="swipehint">Swipe <b>left</b> to dismiss · <b>right</b> to keep · tap card for details</div>
+              <div class="dkeys"><kbd>←</kbd> or <kbd>X</kbd> dismiss &nbsp; <kbd>→</kbd> or <kbd>S</kbd> keep &nbsp; <kbd>1</kbd>–<kbd>5</kbd> rate &nbsp; <kbd>Enter</kbd> details &nbsp; <kbd>O</kbd> open listing &nbsp; <kbd>J</kbd>/<kbd>K</kbd> next / prev &nbsp; <kbd>?</kbd> all keys</div>
             </div>
-            <input id="activity-filter" type="search" placeholder="Filter title / comment…" />
-            <select id="deal-sort" title="Sort listings">
-              <option value="score">Best rated</option>
-              <option value="myrank">My rating</option>
-              <option value="distance">Nearest</option>
-              <option value="newest">Newest</option>
-            </select>
-            <span id="activity-count" class="activity-count"></span>
-            <button id="activity-refresh" class="ghost small" title="Reload search activity">↻</button>
-            <button id="export-csv-btn" class="ghost small" title="Download all found items as CSV">⬇ CSV</button>
+
+            <!-- Reviewed / All: lists -->
+            <div id="list-pane" class="list hidden"></div>
+
+            <!-- Expanded detail -->
+            <div id="detail-pane" class="detail hidden"></div>
           </div>
-          <div class="deals-split">
-            <div id="activity-rows" class="deals-list"></div>
-            <div id="deal-detail" class="deal-detail"></div>
-          </div>
+          <aside class="keys" id="keys">
+            <h4>Keyboard</h4>
+            <div class="k"><span>Next / previous</span><span><kbd>J</kbd><kbd>K</kbd></span></div>
+            <div class="k"><span>Keep (star)</span><span><kbd>→</kbd><kbd>S</kbd></span></div>
+            <div class="k"><span>Dismiss</span><span><kbd>←</kbd><kbd>X</kbd></span></div>
+            <div class="k"><span>Rate</span><span><kbd>1</kbd>…<kbd>5</kbd></span></div>
+            <div class="k"><span>Expand details</span><span><kbd>Enter</kbd></span></div>
+            <div class="k"><span>Collapse</span><span><kbd>Esc</kbd></span></div>
+            <div class="k"><span>Open listing</span><span><kbd>O</kbd></span></div>
+            <div class="k"><span>Undo</span><span><kbd>Z</kbd></span></div>
+            <div class="k"><span>Hide / restore</span><span><kbd>H</kbd></span></div>
+            <div class="k"><span>Search now</span><span><kbd>R</kbd></span></div>
+            <div class="k"><span>This sheet</span><span><kbd>?</kbd></span></div>
+            <h4 class="mt">Session</h4>
+            <div class="k"><span>Reviewed today</span><b id="sess-reviewed">0</b></div>
+            <div class="k"><span>Kept</span><b id="sess-kept" class="c-keep">0</b></div>
+            <div class="k"><span>Dismissed</span><b id="sess-dismissed">0</b></div>
+            <div class="k"><span>Notified</span><b id="sess-notified" class="c-noti">0</b></div>
+          </aside>
         </div>
       </section>
 
-      <!-- ============ Config ============ -->
-      <section id="view-config" class="appview hidden">
-        <div class="editor-pane">
-          <div class="editor-toolbar">
-            <div class="pane-tabs config-tabs">
-              <button id="tab-form" class="pane-tab active" data-config-view="form">Form</button>
-              <button id="tab-toml" class="pane-tab" data-config-view="toml">TOML</button>
-            </div>
-            <div class="add-dropdown" id="add-dropdown">
-              <button id="add-btn" class="toolbar-btn">+ Add section ▾</button>
-              <div id="add-menu" class="add-menu hidden">
-                <button data-prefix="item">Item to watch</button>
-                <button data-prefix="user">User / notification</button>
-                <button data-prefix="ai">AI backend</button>
-                <button data-prefix="marketplace">Marketplace</button>
-              </div>
-            </div>
+      <!-- ================= Items ================= -->
+      <section id="view-items" class="view hidden">
+        <header class="appbar">
+          <div class="top">
+            <button class="ib" id="items-back" aria-label="Back" hidden>
+              <svg class="icon" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+            </button>
+            <h1 id="items-title">Items</h1>
+            <span class="status-chip mchip" data-monitor-chip><i></i>starting…</span>
+            <span class="seg tight" id="config-mode-seg">
+              <button data-config-mode="form" class="on">Form</button>
+              <button data-config-mode="toml">TOML</button>
+            </span>
+          </div>
+        </header>
+        <div id="items-page" class="page"></div>
+        <div id="toml-pane" class="page toml hidden">
+          <div class="toml-toolbar">
             <span id="config-name" class="config-name">—</span>
-            <div class="toolbar-spacer"></div>
-            <button id="save-btn" class="toolbar-btn save-btn" disabled>Save</button>
+            <span class="grow"></span>
+            <button id="save-btn" class="btn pri" disabled>Save</button>
           </div>
-          <div id="config-form-view" class="config-form-view">
-            <div class="form-toolbar">
-              <span class="form-toolbar-title">Hunting</span>
-              <span id="hunting-sub" class="form-toolbar-sub"></span>
-              <div class="toolbar-spacer"></div>
-              <span class="help-label">Help</span>
-              <div class="seg" id="help-seg">
-                <button data-help="off">Off</button>
-                <button data-help="hints" class="on">Hints</button>
-                <button data-help="guided">Guided</button>
-              </div>
-            </div>
-            <div id="config-form-body" class="config-form-body"></div>
-          </div>
-          <div id="config-toml-view" class="config-toml-view hidden">
-            <div class="editor-with-gutter">
-              <div id="gutter" class="gutter"><div id="gutter-inner" class="gutter-inner"></div></div>
-              <div id="editor-host"></div>
-            </div>
+          <div class="editor-with-gutter">
+            <div id="gutter" class="gutter"><div id="gutter-inner" class="gutter-inner"></div></div>
+            <div id="editor-host"></div>
           </div>
           <div id="editor-status" class="editor-status"></div>
         </div>
       </section>
 
-      <!-- ============ Logs ============ -->
-      <section id="view-logs" class="appview hidden">
-        <div id="logs-view" class="logs-view">
-          <div class="logs-toolbar">
-            <div class="level-chips">
-              <button data-level="ALL" class="chip active">All</button>
-              <button data-level="INFO" class="chip">Info</button>
-              <button data-level="WARNING" class="chip">Warn</button>
-              <button data-level="ERROR" class="chip">Error</button>
-            </div>
-            <div class="kind-chips">
-              <button data-kind="" class="chip active">Any</button>
-              <button data-kind="ai_eval" class="chip">AI eval</button>
-              <button data-kind="search_summary" class="chip">Searches</button>
-              <button data-kind="listing_skip" class="chip">Skipped</button>
-              <button data-kind="credentials_wait" class="chip">Login</button>
-            </div>
-            <select id="item-filter" title="Filter by item"><option value="">Any item</option></select>
-            <select id="score-filter" title="Minimum score">
-              <option value="">Any score</option>
-              <option value="3">≥ 3</option>
-              <option value="4">≥ 4</option>
-              <option value="5">= 5 (high)</option>
-            </select>
-            <input id="log-filter" type="search" placeholder="Text filter…" />
-            <label class="autoscroll">
-              <input id="autoscroll" type="checkbox" checked /> auto-scroll
-            </label>
-            <button id="log-clear" class="ghost small" title="Clear the in-memory tail (the disk log is untouched)">Clear</button>
-            <button id="log-download" class="ghost small" title="Download the full log file from disk">⬇ Download</button>
-          </div>
-          <div id="logs" class="logs"></div>
-        </div>
+      <!-- ================= Sources ================= -->
+      <section id="view-sources" class="view hidden">
+        <header class="appbar"><div class="top"><h1>Sources</h1><span class="status-chip mchip" data-monitor-chip><i></i>starting…</span></div></header>
+        <div id="sources-page" class="page"></div>
       </section>
 
-      <!-- ============ Status ============ -->
-      <section id="view-status" class="appview hidden">
-        <div class="status-page">
-          <div class="status-head">
-            <h2>Status</h2>
-            <span id="status-updated" class="status-updated"></span>
-            <div class="toolbar-spacer"></div>
-            <button id="status-refresh" class="ghost small" title="Refresh now">↻ Refresh</button>
+      <!-- ================= Status ================= -->
+      <section id="view-status" class="view hidden">
+        <header class="appbar"><div class="top"><h1>Status</h1><span class="status-chip mchip" data-monitor-chip><i></i>starting…</span><button class="ib" id="status-refresh" aria-label="Refresh" title="Refresh now">↻</button></div></header>
+        <div id="status-page" class="page">
+          <div id="status-body"></div>
+          <div class="gl" id="logs-label">Logs <span id="ws-status" class="n">· connecting…</span></div>
+          <div class="g logs-card">
+            <div class="logs-toolbar">
+              <div class="chips level-chips">
+                <button data-level="ALL" class="chip on">All</button>
+                <button data-level="INFO" class="chip">Info</button>
+                <button data-level="WARNING" class="chip">Warn</button>
+                <button data-level="ERROR" class="chip">Error</button>
+              </div>
+              <div class="chips kind-chips">
+                <button data-kind="" class="chip on">Any</button>
+                <button data-kind="ai_eval" class="chip">AI eval</button>
+                <button data-kind="search_summary" class="chip">Searches</button>
+                <button data-kind="listing_skip" class="chip">Skipped</button>
+                <button data-kind="credentials_wait" class="chip">Login</button>
+              </div>
+              <div class="frow">
+                <select id="item-filter" class="inp" title="Filter by item"><option value="">Any item</option></select>
+                <select id="score-filter" class="inp" title="Minimum score">
+                  <option value="">Any score</option>
+                  <option value="3">≥ 3</option>
+                  <option value="4">≥ 4</option>
+                  <option value="5">= 5</option>
+                </select>
+              </div>
+              <div class="frow">
+                <input id="log-filter" class="inp grow" type="search" placeholder="Text filter…" autocomplete="off" />
+              </div>
+              <div class="frow">
+                <label class="autoscroll"><input id="autoscroll" type="checkbox" checked /> auto-scroll</label>
+                <span class="grow"></span>
+                <button id="log-clear" class="btn ghost sm" title="Clear the in-memory tail (the disk log is untouched)">Clear</button>
+                <button id="log-download" class="btn ghost sm" title="Download the full log file from disk">⬇ Download</button>
+              </div>
+            </div>
+            <div id="logs" class="logs"></div>
           </div>
-          <div id="status-body" class="status-body">
-            <div class="status-loading">Loading…</div>
-          </div>
+          <div class="g"><button class="r danger full" id="logout-row">Log out</button></div>
         </div>
       </section>
-
     </main>
 
-    <footer class="footer">
-      <span id="ws-status">● connecting…</span>
-      <span id="mtime"></span>
-    </footer>
+    <!-- Mobile bottom tabs -->
+    <nav class="tabs" id="tabs">
+      <a href="#review" data-view="review" class="on"><span class="pill"><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="3"/><path d="M9 8h6M9 12h6"/></svg><span class="badge" id="tab-badge" hidden>0</span></span>Review</a>
+      <a href="#items" data-view="items"><span class="pill"><svg class="icon" viewBox="0 0 24 24"><path d="M4 4h8l8 8-8 8-8-8z"/><circle cx="8" cy="8" r="1.5"/></svg></span>Items</a>
+      <a href="#sources" data-view="sources"><span class="pill"><svg class="icon" viewBox="0 0 24 24"><path d="M9 3v6M15 3v6M6 9h12v3a6 6 0 0 1-12 0zM12 18v3"/></svg></span>Sources</a>
+      <a href="#status" data-view="status"><span class="pill"><svg class="icon" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>Status</a>
+    </nav>
+
+    <div id="toast" class="toast hidden"><span id="toast-text"></span><button id="toast-undo" class="tbtn" hidden>Undo</button></div>
   </div>
 
-  <!-- Section form modal -->
+  <!-- ================= Section form modal ================= -->
   <div id="form-modal" class="modal hidden">
     <div class="modal-backdrop"></div>
     <div class="modal-card form-modal-card">
@@ -191,7 +252,7 @@
              section, not one setting among forty, so it lives beside the
              title rather than buried in the field grid. -->
         <div id="form-modal-toggle" class="modal-header-toggle" hidden></div>
-        <button class="modal-close" id="form-modal-close">×</button>
+        <button class="modal-close ib" id="form-modal-close" aria-label="Close">×</button>
       </div>
       <div class="modal-body">
         <p id="form-modal-hint" class="modal-hint" hidden></p>
@@ -199,8 +260,28 @@
         <div id="form-error" class="error" hidden></div>
       </div>
       <div class="modal-footer">
-        <button type="button" id="form-cancel" class="ghost">Cancel</button>
-        <button type="button" id="form-save" class="primary">Save</button>
+        <button type="button" id="form-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="form-save" class="btn pri">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Keyboard cheatsheet ================= -->
+  <div id="keys-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card keys-card">
+      <div class="modal-header"><h2>Keyboard</h2><button class="modal-close ib" id="keys-close" aria-label="Close">×</button></div>
+      <div class="modal-body keys-body">
+        <div class="k"><span>Next / previous listing</span><span><kbd>J</kbd><kbd>K</kbd></span></div>
+        <div class="k"><span>Keep (star)</span><span><kbd>→</kbd><kbd>S</kbd></span></div>
+        <div class="k"><span>Dismiss</span><span><kbd>←</kbd><kbd>X</kbd></span></div>
+        <div class="k"><span>Rate 1–5 (same key clears)</span><span><kbd>1</kbd>…<kbd>5</kbd></span></div>
+        <div class="k"><span>Expand / collapse details</span><span><kbd>Enter</kbd><kbd>Esc</kbd></span></div>
+        <div class="k"><span>Open listing in a new tab</span><span><kbd>O</kbd></span></div>
+        <div class="k"><span>Undo last decision</span><span><kbd>Z</kbd></span></div>
+        <div class="k"><span>Hide / restore listing</span><span><kbd>H</kbd></span></div>
+        <div class="k"><span>Search now</span><span><kbd>R</kbd></span></div>
+        <div class="k"><span>This sheet</span><span><kbd>?</kbd></span></div>
       </div>
     </div>
   </div>
@@ -208,7 +289,7 @@
   <!--
     Load the vendored toml-edit-js (Rust→WASM port of toml_edit).
     Initializes once and exposes parse/edit/stringify on window.tomlEdit
-    so the classic app.js script can call it after init resolves.
+    so the classic scripts can call it after init resolves.
   -->
   <script type="module">
     import init, { parse, edit, stringify } from "/static/vendor/toml-edit-js/shims.js";
@@ -226,6 +307,10 @@
   </script>
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/vendor/codemirror.js"></script>
-  <script src="/static/app.js"></script>
+  <!-- Classic scripts sharing the window.AIMM namespace; order matters. -->
+  <script src="/static/app-core.js"></script>
+  <script src="/static/app-review.js"></script>
+  <script src="/static/app-config.js"></script>
+  <script src="/static/app-status.js"></script>
 </body>
 </html>

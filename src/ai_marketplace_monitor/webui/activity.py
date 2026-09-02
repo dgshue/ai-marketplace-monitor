@@ -211,7 +211,7 @@ def _collect_by_listing(local_cache: Cache) -> Dict[Tuple[str, str, str], Dict[s
 
 
 def _collect_flags(local_cache: Cache) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """(marketplace, listing_id) -> user flags: my_rank and hidden."""
+    """(marketplace, listing_id) -> user flags: my_rank, hidden, kept, reviewed_at."""
     flags: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for key in local_cache.iterkeys():
         if not isinstance(key, tuple) or len(key) < 3:
@@ -358,6 +358,16 @@ def build_activity(
                     ),
                     "hidden": bool(
                         user_flags.get((listing.marketplace, listing.id), {}).get("hidden")
+                    ),
+                    # Swipe-right in the review queue. Kept, hidden and my_rank
+                    # are the three user decisions; reviewed_at is stamped by
+                    # the flag endpoint when any of them is set, and the UI's
+                    # Queue / Reviewed split is derived from exactly that.
+                    "kept": bool(
+                        user_flags.get((listing.marketplace, listing.id), {}).get("kept")
+                    ),
+                    "reviewed_at": user_flags.get((listing.marketplace, listing.id), {}).get(
+                        "reviewed_at"
                     ),
                 }
             )

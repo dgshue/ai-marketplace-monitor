@@ -6,13 +6,22 @@ AI Marketplace Monitor includes a built-in web interface for editing your config
 
 ## Overview
 
-The web UI provides:
+The web UI is mobile-first and can be pinned to a phone's home screen. It has four screens:
 
-- **TOML Config Editor** with syntax highlighting, powered by CodeMirror
-- **Add / Edit / Delete** config sections (items, AI backends, users, marketplaces) through guided forms
-- **Live Log Streaming** with filtering by level, item, AI score, and text search
-- **Export CSV** button in the header downloads all found (notified) listings — link, price, rating, and details — as a CSV file
-- **Auto-validation** of your config as you type
+- **Review** — the listings the AI has rated, one card at a time. Swipe right (or press `→` / `S`) to keep,
+  swipe left (`←` / `X`) to dismiss, tap (`Enter`) for the full detail with photo, facts, pickup map, drive
+  time and the AI's reasoning; rate `1`–`5`, undo with `Z`. *Queue* holds what you have not decided on,
+  *Reviewed* what you have, *All* everything with item / verdict / text filters, sorting and CSV export.
+  On a desktop the queue is a left rail and the whole flow is keyboard-driven (`?` shows every key).
+- **Items** — one grouped-list editor per item: search phrases, description, price range, notify
+  threshold, exclusions, sources, schedule and pause. Inline edits save automatically; **More settings**
+  opens the full form. A **Form / TOML** switch exposes the raw config with syntax highlighting, auto-validation
+  and section menus.
+- **Sources** — marketplaces (Facebook session state, eBay browser/API mode, Depop, Poshmark with one-tap
+  set-up), AI backends, notification channels, users, environment-variable checks and the noVNC browser link.
+- **Status** — monitor state, pause / resume / search now, blocked marketplaces with *Clear block*, counters,
+  schedule, session details and the live log stream with level / kind / item / score / text filters,
+  clear and download.
 
 ## Getting Started
 

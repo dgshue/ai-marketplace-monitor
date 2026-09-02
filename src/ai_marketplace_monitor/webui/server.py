@@ -704,9 +704,14 @@ def create_app(
     ) -> Dict[str, Any]:
         """Set the user's own state on a listing.
 
-        my_rank (1-5 or null) and/or hidden, stored in the diskcache keyed by
-        (marketplace, id) so it joins the same way ratings do — hidden
-        listings stay fully tracked.
+        my_rank (1-5 or null), hidden and/or kept, stored in the diskcache
+        keyed by (marketplace, id) so it joins the same way ratings do —
+        hidden listings stay fully tracked.
+
+        Any of the three counts as a review decision, so ``reviewed_at`` is
+        stamped whenever one is present and dropped when the last one is
+        cleared: that is what puts a listing back in the review queue after
+        an undo.
         """
         try:
             body = await request.json()
@@ -729,7 +734,14 @@ def create_app(
                 raise HTTPException(status_code=400, detail="my_rank must be 1-5 or null")
         if "hidden" in body:
             flags["hidden"] = bool(body["hidden"])
+        if "kept" in body:
+            flags["kept"] = bool(body["kept"])
         flags["updated_at"] = time.time()
+        decided = bool(flags.get("hidden")) or bool(flags.get("kept")) or "my_rank" in flags
+        if decided:
+            flags.setdefault("reviewed_at", flags["updated_at"])
+        else:
+            flags.pop("reviewed_at", None)
         cache.set(key, flags, tag=CacheType.USER_FLAGS.value)
         return {"ok": True, "flags": flags}
 
