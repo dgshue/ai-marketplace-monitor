@@ -4,6 +4,12 @@
 //   reviewed  = the user decided (kept, hidden, or rated) -> reviewed_at is set
 //   queue     = not reviewed, on an active item
 //   all       = everything, with the verdict / item / text filters and sorts
+// Three score tiers, set by review_rating / rating in the config:
+//   verdict "low"       -- under the review threshold: rated once, cached, and
+//                          kept out of Queue, Reviewed and every day count.
+//                          Reachable only through the All view's Low chip.
+//   verdict "promising" -- at or above the review threshold, not notified.
+//   verdict "notified"  -- a notification went out.
 (() => {
   const { $, $$, esc, api, state, on, emit, toast, fmtDur, isDesktop, modalOpen, typing, activeBlocks } = window.AIMM;
 
@@ -32,8 +38,17 @@
   const rowKey = (row) => `${row.marketplace}:${row.id}`;
   const byKey = (key) => R.listings.find((r) => rowKey(r) === key) || null;
   const isReviewed = (row) => !!(row.kept || row.hidden || row.my_rank != null);
+  // "I really don't want to see 1s and 2s": below the review threshold a row
+  // is tracked, never queued. Older activity payloads carry no verdict "low",
+  // so nothing changes for them.
+  const isLow = (row) => row.verdict === "low";
+  const notLow = (row) => !isLow(row);
   const scoreClass = (s) => "s" + Math.max(0, Math.min(5, Number(s) || 0));
   const whyClass = (s) => (s >= 4 ? "" : s === 3 ? "mid" : "low");
+  const verdictClass = (row) => (row.verdict === "notified" ? "noti" : row.verdict === "promising" ? "prom" : "dism");
+  // "dismissed" is the pre-three-tier value; rows cached under it still render.
+  const VERDICT_TEXT = { low: "Low", dismissed: "Below threshold" };
+  const verdictText = (row) => VERDICT_TEXT[row.verdict] || row.verdict;
   const MARKET_LABEL = { facebook: "Facebook", ebay: "eBay", depop: "Depop", poshmark: "Poshmark" };
   const marketLabel = (m) => MARKET_LABEL[m] || m;
   const srcGlyph = (m) => {
@@ -84,12 +99,12 @@
   };
 
   const queueRows = () =>
-    R.listings.filter((r) => !isReviewed(r) && itemMatch(r) && textMatch(r)).sort(SORTERS[R.sort] || SORTERS.score);
+    R.listings.filter((r) => notLow(r) && !isReviewed(r) && itemMatch(r) && textMatch(r)).sort(SORTERS[R.sort] || SORTERS.score);
 
   const reviewedRows = () =>
     R.listings
       .filter((r) => {
-        if (!isReviewed(r) || !itemMatch(r) || !textMatch(r)) return false;
+        if (isLow(r) || !isReviewed(r) || !itemMatch(r) || !textMatch(r)) return false;
         if (R.rchip === "kept") return !!r.kept;
         if (R.rchip === "dismissed") return !!r.hidden;
         if (R.rchip === "notified") return r.verdict === "notified";
@@ -98,7 +113,9 @@
       .sort((a, b) => (b.reviewed_at || 0) - (a.reviewed_at || 0) || b.score - a.score);
 
   // The All view keeps the old Deals semantics: hidden rows only under their
-  // own chip, every other chip filters on the AI verdict.
+  // own chip, every other chip filters on the AI verdict. Low rows are the
+  // same deal — the "All verdicts" chip excludes them so the default stays
+  // clean, and the Low chip is the one place they surface.
   const allRows = () =>
     R.listings
       .filter((r) => {
@@ -107,6 +124,7 @@
         } else {
           if (r.hidden) return false;
           if (R.verdict && r.verdict !== R.verdict) return false;
+          if (!R.verdict && isLow(r)) return false;
         }
         return itemMatch(r) && textMatch(r);
       })
@@ -277,7 +295,7 @@
 
   const renderHead = () => {
     const q = queueRows();
-    const reviewedActive = R.listings.filter((r) => isReviewed(r) && itemMatch(r)).length;
+    const reviewedActive = R.listings.filter((r) => notLow(r) && isReviewed(r) && itemMatch(r)).length;
     const denom = q.length + reviewedActive;
     const pct = denom ? Math.round((reviewedActive / denom) * 100) : 0;
     $("#q-count").textContent = q.length === 1 ? "1 to review" : `${q.length} to review`;
@@ -302,12 +320,16 @@
 
     // Command-style "today" strip: what arrived while you were away.
     const t0 = startOfToday();
-    const today = R.listings.filter((r) => (r.rated_at || 0) >= t0);
+    const ratedToday = R.listings.filter((r) => (r.rated_at || 0) >= t0);
+    // "N new" counts what is worth a look; the low ones get a muted tail so
+    // the AI's real workload is still visible without cluttering the number.
+    const today = ratedToday.filter(notLow);
+    const lowToday = ratedToday.length - today.length;
     const notified = today.filter((r) => r.verdict === "notified").length;
     const promising = today.filter((r) => r.verdict === "promising").length;
     const blocks = activeBlocks(state.monitorInfo);
     const chips = [];
-    chips.push(`<span class="pill">today <b>${today.length}</b> new</span>`);
+    chips.push(`<span class="pill">today <b>${today.length}</b> new${lowToday ? ` <span class="muted">· ${lowToday} low</span>` : ""}</span>`);
     if (notified) chips.push(`<span class="pill"><b>${notified}</b> notified</span>`);
     if (promising) chips.push(`<span class="pill"><b>${promising}</b> promising</span>`);
     blocks.forEach((b) => chips.push(`<span class="pill blk">⛔ ${esc(b.marketplace)} blocked</span>`));
@@ -337,7 +359,7 @@
       ordered
         .map((s) => {
           const paused = s.active === false;
-          const tip = `${s.item}: ${s.examined} examined · ${s.promising} promising · ${s.notified} notified · ${s.dismissed} below threshold` + (paused ? " · paused — tap to view its history" : "");
+          const tip = `${s.item}: ${s.examined} rated · review ≥ ${s.review_threshold ?? s.threshold}, notify ≥ ${s.threshold} · ${s.promising} promising · ${s.notified} notified · ${s.low || 0} low` + (paused ? " · paused — tap to view its history" : "");
           return `<button class="chip ${R.item === s.item ? "on" : ""} ${paused ? "paused" : ""}" data-item-pill="${esc(s.item)}" title="${esc(tip)}">${esc(s.item)} <span class="c">${s.examined}${paused ? " ⏸" : ""}</span></button>`;
         })
         .join("");
@@ -358,8 +380,8 @@
     if (row.location) metaBits.push(esc(row.location));
     if (row.condition) metaBits.push(esc(row.condition));
     if (row.marketplace !== "facebook") metaBits.unshift(esc(marketLabel(row.marketplace)));
-    const tagCls = row.verdict === "notified" ? "noti" : row.verdict === "promising" ? "prom" : "dism";
-    const tagTxt = row.verdict === "dismissed" ? "Below threshold" : row.verdict;
+    const tagCls = verdictClass(row);
+    const tagTxt = verdictText(row);
     return `
       <div class="tcard ${cls}" data-key="${esc(rowKey(row))}">
         <span class="stamp keep">KEEP</span><span class="stamp nope">NOPE</span>
@@ -430,7 +452,7 @@
     if (mode === "queue") {
       const rows = queueRows();
       const t0 = startOfToday();
-      const doneToday = R.listings.filter((r) => isReviewed(r) && itemMatch(r) && (r.reviewed_at || 0) >= t0).sort((a, b) => (b.reviewed_at || 0) - (a.reviewed_at || 0)).slice(0, 8);
+      const doneToday = R.listings.filter((r) => notLow(r) && isReviewed(r) && itemMatch(r) && (r.reviewed_at || 0) >= t0).sort((a, b) => (b.reviewed_at || 0) - (a.reviewed_at || 0)).slice(0, 8);
       let html = rows.length ? rows.map((r) => rowHtml(r)).join("") : `<div class="list-empty">Queue clear.</div>`;
       if (doneToday.length) html += `<div class="grp">Reviewed today</div>` + doneToday.map((r) => rowHtml(r, "dis")).join("");
       return html;
@@ -458,8 +480,8 @@
   };
 
   const feedCard = (row) => {
-    const tagCls = row.verdict === "notified" ? "noti" : row.verdict === "promising" ? "prom" : "dism";
-    const tagTxt = row.verdict === "dismissed" ? "Below threshold" : row.verdict;
+    const tagCls = verdictClass(row);
+    const tagTxt = verdictText(row);
     const meta = [];
     if (row.distance_mi != null) meta.push(`<b>${row.distance_mi} mi</b>`);
     const route = R.routes[rowKey(row)];
@@ -521,7 +543,7 @@
       (R.mode === "reviewed"
         ? `<div class="chips rchips">${[["", "All"], ["kept", "Kept"], ["dismissed", "Dismissed"], ["notified", "Notified"]]
             .map(([v, l]) => {
-              const base = R.listings.filter((r) => isReviewed(r) && itemMatch(r) && textMatch(r));
+              const base = R.listings.filter((r) => notLow(r) && isReviewed(r) && itemMatch(r) && textMatch(r));
               const n = v === "" ? base.length : v === "kept" ? base.filter((r) => r.kept).length : v === "dismissed" ? base.filter((r) => r.hidden).length : base.filter((r) => r.verdict === "notified").length;
               return `<button class="chip ${R.rchip === v ? "on" : ""}" data-rchip="${v}">${l} <span class="c">${n}</span></button>`;
             })
@@ -532,8 +554,8 @@
   // ---- detail ----
   let dealMap = null;
   const detailHtml = (row, pos, total) => {
-    const tagCls = row.verdict === "notified" ? "noti" : row.verdict === "promising" ? "prom" : "dism";
-    const tagTxt = row.verdict === "dismissed" ? "Below threshold" : row.verdict;
+    const tagCls = verdictClass(row);
+    const tagTxt = verdictText(row);
     const route = R.routes[rowKey(row)];
     const distBits = [];
     if (row.distance_mi != null) distBits.push(`<b>${row.distance_mi} mi away</b>`);
@@ -542,7 +564,9 @@
     if (row.location) facts.push(["Location", row.location]);
     if (row.condition) facts.push(["Condition", row.condition]);
     if (row.seller) facts.push(["Seller", row.seller]);
-    facts.push(["Threshold", `notify ≥ ${row.threshold} · ${row.score >= row.threshold ? "met" : "not met"}`]);
+    const reviewThr = row.review_threshold == null ? row.threshold : row.review_threshold;
+    const tierMet = row.score >= row.threshold ? "notify met" : row.score >= reviewThr ? "review met" : "not met";
+    facts.push(["Threshold", `review ≥ ${reviewThr} · notify ≥ ${row.threshold} · ${tierMet}`]);
     if (row.notified_at) facts.push(["Notified", row.notified_at]);
     const showMap = !!(row.coords && R.home && row.marketplace === "facebook" && window.L);
     const RATE = ["pass", "meh", "maybe", "good", "must see"];

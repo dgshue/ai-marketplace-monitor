@@ -413,7 +413,15 @@ textarea.inp { min-height: 88px; padding: 10px 12px; line-height: 1.45; resize: 
 body.help-hints .fieldhelp, body.help-guided .fieldhelp { display: block; }
 .fieldhelp .ex { display: none; margin-top: 6px; padding: 8px 10px; border-left: 2px solid var(--ac); background: var(--sur2); border-radius: 0 8px 8px 0; color: #c7cdd8; }
 body.help-guided .fieldhelp .ex { display: block; }
-.thr-note, .icadence { font-size: 12px; color: var(--mu); }
+.thr-note, .rev-note, .icadence { font-size: 12px; color: var(--mu); }
+/* Review / notify thresholds sit side by side: at 390px each column is wide
+   enough for one .step (132px) and the label + note wrap under it. */
+.g .r.thrpair { align-items: flex-start; gap: 12px; padding: 12px 16px; }
+.thrcol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.thrlab { font-size: 13px; color: var(--mu); }
+/* No `wrap` class on these notes: that is the page-shell utility and carries
+   a 90px bottom padding on phones. */
+.thrcol .thr-note, .thrcol .rev-note { display: block; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 .item-foot { color: var(--mu); font-size: 12px; text-align: center; margin: 8px 0 12px; min-height: 16px; }
 .item-foot.err { color: #ff8a8f; }
 .blkrow { background: #2a1a1c; border: 1px solid #5a2a2e; border-radius: 16px; padding: 14px 16px; margin-bottom: 16px; }

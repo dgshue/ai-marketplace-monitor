@@ -73,6 +73,23 @@ _cases = [
 ]
 check("tile-preferred merge unit", all(_fb._prefer_tile(a, b) == want for (a, b), want in _cases))
 
+# ---------- pre-browser unit: the tile price always wins ----------
+# Vehicle PDPs have no price element, so the scraper takes the first "$..." in
+# the description -- the down payment on a dealer listing. Plausible, so
+# _prefer_tile's junk test misses it; only an outright tile preference fixes it.
+_price_cases = [
+    (("$450", "$3,000 | $4,200"), "$3,000 | $4,200"),
+    (("$550", "$5,500"), "$5,500"),
+    (("$450", None), "$450"),
+    (("$450", ""), "$450"),
+    (("**unspecified**", None), ""),
+]
+check(
+    "tile price wins at the cache boundary",
+    all(_fb._merge_price(a, b) == want for (a, b), want in _price_cases),
+    [(a, b, _fb._merge_price(a, b)) for (a, b), _ in _price_cases],
+)
+
 # ---------- pre-browser unit: the drift-proof rating join ----------
 from ai_marketplace_monitor.utils import CacheType as _CT
 from ai_marketplace_monitor.utils import cache as _cache
@@ -120,6 +137,75 @@ try:
 finally:
     _cache.delete((_CT.LISTING_DETAILS.value, _probe_url))
     _cache.delete((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"))
+
+# ---------- pre-browser unit: the three score tiers ----------
+# Own scratch cache and own config: the verdict boundaries have to be proved
+# against known thresholds, not against whatever the live config happens to say.
+from diskcache import Cache as _Cache
+
+from ai_marketplace_monitor.listing import Listing as _Listing
+from ai_marketplace_monitor.webui.activity import thresholds_from_config as _tfc
+
+_TIER_CONFIG = QA_DIR / "tiers.toml"
+_TIER_CONFIG.write_text(
+    """
+[marketplace.facebook]
+search_city = 'dallas'
+rating = 5
+review_rating = 3
+
+[user.me]
+pushbullet_token = 'x'
+
+[item.tiers]
+search_phrases = 'thing'
+""",
+    encoding="utf-8",
+)
+_tier_cache = _Cache(str(QA_DIR / "tier-cache"))
+try:
+    for _score in (1, 2, 3, 4, 5):
+        _lid = f"tier-{_score}"
+        _l = _Listing(
+            marketplace="facebook",
+            name="",
+            id=_lid,
+            title=f"probe {_score}",
+            image="",
+            price="$1",
+            post_url=f"https://qa.invalid/item/{_lid}",
+            location="",
+            seller="",
+            condition="",
+            description="",
+        )
+        _l.to_cache(_l.post_url, local_cache=_tier_cache)
+        _tier_cache.set(
+            (_CT.AI_BY_LISTING.value, "facebook", _lid, "tiers"),
+            {"score": _score, "comment": "probe", "name": "qa"},
+            tag=_CT.AI_BY_LISTING.value,
+        )
+    _tier_out = _ba(_tier_cache, [_TIER_CONFIG], limit=100)
+    _by_score = {r["score"]: r["verdict"] for r in _tier_out["listings"]}
+    check(
+        "verdicts: below review_rating is low, at or above is promising",
+        _by_score == {1: "low", 2: "low", 3: "promising", 4: "promising", 5: "promising"},
+        _by_score,
+    )
+    check(
+        "activity rows carry review_threshold beside threshold",
+        all((r["review_threshold"], r["threshold"]) == (3, 5) for r in _tier_out["listings"]),
+    )
+    _tier_sum = _tier_out["summary"][0]
+    check(
+        "summary counts low apart from promising",
+        (_tier_sum["examined"], _tier_sum["low"], _tier_sum["promising"]) == (5, 2, 3),
+        {k: _tier_sum[k] for k in ("examined", "low", "promising", "notified")},
+    )
+    _pi, _nd, _dis, _pr, _rd = _tfc([_TIER_CONFIG])
+    check("thresholds_from_config resolves both tiers", (_pi["tiers"], _pr["tiers"]) == (5, 3))
+finally:
+    _tier_cache.close()
 
 
 def js(pg, code, *args):
@@ -230,6 +316,51 @@ def open_item(pg, name):
     pg.click(f"#items-page [data-open-item='{name}']")
     pg.wait_for_timeout(450)
 
+
+# ---------- low-tier probe: one row under the review threshold, one at it ----------
+# The live cache may or may not hold a listing below the review threshold, and
+# "does the queue hide it" is not a check worth leaving to chance. Two probe
+# rows on a real, active item make it deterministic; both are deleted before
+# the summary. rated_at is now, so they also exercise the today strip.
+_qa_notify, _, _qa_disabled, _qa_review, _ = _tfc([QA_CONFIG])
+_probe_item = next((name for name in sorted(_qa_notify) if name not in _qa_disabled), None)
+_PROBE_REVIEW = _qa_review.get(_probe_item, 3) if _probe_item else 3
+LOW_ID = "qa-tier-low"
+OK_ID = "qa-tier-ok"
+_probe_keys = []
+
+
+def _seed_probe(listing_id, score):
+    url = f"https://qa.invalid/item/{listing_id}"
+    _cache.set(
+        (_CT.LISTING_DETAILS.value, url),
+        {
+            "marketplace": "facebook",
+            "name": "",
+            "id": listing_id,
+            "title": f"QA tier probe scoring {score}",
+            "image": "",
+            "price": "$1",
+            "post_url": url,
+            "location": "",
+            "seller": "",
+            "condition": "",
+            "description": "tier probe",
+        },
+        tag=_CT.LISTING_DETAILS.value,
+    )
+    _cache.set(
+        (_CT.AI_BY_LISTING.value, "facebook", listing_id, _probe_item),
+        {"score": score, "comment": "tier probe", "name": "qa", "rated_at": time.time()},
+        tag=_CT.AI_BY_LISTING.value,
+    )
+    _probe_keys.append((_CT.LISTING_DETAILS.value, url))
+    _probe_keys.append((_CT.AI_BY_LISTING.value, "facebook", listing_id, _probe_item))
+
+
+if _probe_item and _PROBE_REVIEW > 1:
+    _seed_probe(LOW_ID, _PROBE_REVIEW - 1)
+    _seed_probe(OK_ID, _PROBE_REVIEW)
 
 msgs = []
 with sync_playwright() as p:
@@ -398,6 +529,36 @@ with sync_playwright() as p:
         "tab badge equals queue size",
         js(pg, "document.querySelector('#tab-badge').textContent") == str(q0) or q0 > 99,
     )
+    if _probe_item and _PROBE_REVIEW > 1:
+        check(
+            "low row absent from the queue, sibling at threshold present",
+            js(
+                pg,
+                "window.__aimm.queueRows().every(r => r.id !== arguments0)".replace(
+                    "arguments0", json.dumps(LOW_ID)
+                ),
+            )
+            and js(
+                pg,
+                "window.__aimm.queueRows().some(r => r.id === arguments0)".replace(
+                    "arguments0", json.dumps(OK_ID)
+                ),
+            ),
+            f"review >= {_PROBE_REVIEW} on {_probe_item}",
+        )
+        check(
+            "queue counts (badge, 'N to review', segment) exclude low",
+            js(pg, "window.AIMM.review.listings.some(r => r.verdict === 'low')")
+            and js(
+                pg,
+                "Number(document.querySelector('#n-queue').textContent) === window.__aimm.queueRows().length",
+            ),
+        )
+        check(
+            "today strip counts low separately and muted",
+            "low" in (pg.text_content("#today-strip") or ""),
+            (pg.text_content("#today-strip") or "")[:80],
+        )
     pg.screenshot(path="/tmp/qa/queue-desktop.png")
 
     def top_key():
@@ -499,6 +660,16 @@ with sync_playwright() as p:
             pg,
             "document.querySelectorAll('#detail-pane .badges .sc').length === 1 && document.body.innerText.includes('notify ≥') && !!document.querySelector('#detail-pane .why2') && document.querySelectorAll('#detail-pane .rate5 .star').length === 5",
         ),
+    )
+    check(
+        "threshold fact names both tiers and which one the score reached",
+        bool(
+            re.search(
+                r"review ≥ \d+ · notify ≥ \d+ · (notify met|review met|not met)",
+                pg.text_content("#detail-pane .facts") or "",
+            )
+        ),
+        (pg.text_content("#detail-pane .facts") or "")[-70:],
     )
     check(
         "detail action bar: Dismiss / Open / Keep",
@@ -655,6 +826,10 @@ with sync_playwright() as p:
         "desktop: Reviewed shows the current row's detail in the centre",
         visible(pg, "#detail-pane"),
     )
+    check(
+        "Reviewed never lists a low row",
+        js(pg, "window.__aimm.reviewedRows().every(r => r.verdict !== 'low')"),
+    )
     pg.screenshot(path="/tmp/qa/reviewed-desktop.png")
     pg.click(f"#rail [data-undo-row={json.dumps(k1)}]")
     pg.wait_for_timeout(1200)
@@ -746,9 +921,29 @@ with sync_playwright() as p:
         "hidden chip shows only dismissed-by-me rows",
         js(pg, "window.__aimm.allRows().every(r => r.hidden)"),
     )
+    pg.click("#verdict-chips [data-verdict=low]")
+    pg.wait_for_timeout(300)
+    check(
+        "Low chip is the one place low rows surface",
+        js(pg, "window.__aimm.allRows().every(r => r.verdict === 'low')")
+        and (
+            not (_probe_item and _PROBE_REVIEW > 1)
+            or js(
+                pg,
+                "window.__aimm.allRows().some(r => r.id === arguments0)".replace(
+                    "arguments0", json.dumps(LOW_ID)
+                ),
+            )
+        ),
+    )
+    pg.screenshot(path="/tmp/qa/all-low-desktop.png")
     pg.click("#verdict-chips [data-verdict='']")
     pg.wait_for_timeout(300)
     check("all chip hides hidden rows", js(pg, "window.__aimm.allRows().every(r => !r.hidden)"))
+    check(
+        "the default All chip keeps low rows out",
+        js(pg, "window.__aimm.allRows().every(r => r.verdict !== 'low')"),
+    )
     pg.fill("#activity-filter", "a")
     pg.wait_for_timeout(300)
     check(
@@ -963,12 +1158,43 @@ with sync_playwright() as p:
     pg.fill("#items-page [data-field=max_price]", orig_max)
     pg.dispatch_event("#items-page [data-field=max_price]", "change")
     pg.wait_for_timeout(600)
+    # thresholds: two steppers side by side -- review tier and notify tier
+    check(
+        "item card shows both thresholds as steppers",
+        visible(pg, "#items-page .rev-val")
+        and visible(pg, "#items-page .thr-val")
+        and js(pg, "document.querySelectorAll('#items-page .r.thrpair .step').length") == 2,
+    )
+    check(
+        "the two steppers read review <= notify",
+        int(pg.text_content("#items-page .rev-val"))
+        <= int(pg.text_content("#items-page .thr-val")),
+        (pg.text_content("#items-page .rev-val"), pg.text_content("#items-page .thr-val")),
+    )
+
+    # `rating` is a substring of `review_rating`, so every assertion about one
+    # key being present or absent has to anchor on the start of the line.
+    def has_key(key, section=None):
+        return bool(
+            re.search(r"(?m)^\s*" + key + r"\s*=", segment(cm_value(pg), f"[{section or S}]"))
+        )
+
+    def key_value(key, section=None):
+        m = re.search(
+            r"(?m)^\s*" + key + r"\s*=\s*(\d+)", segment(cm_value(pg), f"[{section or S}]")
+        )
+        return int(m.group(1)) if m else None
+
     # threshold stepper: set explicit, clear back to inherit
     eff = int(pg.text_content("#items-page .thr-val"))
-    pg.click("#items-page [data-thr-dec]" if eff > 1 else "#items-page [data-thr-inc]")
+    rev_eff = int(pg.text_content("#items-page .rev-val"))
+    # Raise when lowering would cross under the review tier -- the stepper
+    # refuses that pair on purpose, and it is checked on its own below.
+    down_ok = eff > 1 and eff - 1 >= rev_eff
+    pg.click("#items-page [data-thr-dec]" if down_ok else "#items-page [data-thr-inc]")
     pg.wait_for_timeout(700)
-    want = eff - 1 if eff > 1 else eff + 1
-    check("threshold stepper writes rating", f"rating = {want}" in segment(cm_value(pg), f"[{S}]"))
+    want = eff - 1 if down_ok else min(5, eff + 1)
+    check("threshold stepper writes rating", key_value("rating") == want, key_value("rating"))
     check(
         "threshold note shows the meaning",
         bool(
@@ -980,8 +1206,88 @@ with sync_playwright() as p:
     )
     pg.click("#items-page [data-thr-clear]")
     pg.wait_for_timeout(700)
-    check("threshold reset removes rating", "rating" not in segment(cm_value(pg), f"[{S}]"))
+    check("threshold reset removes rating", not has_key("rating"))
     check("cleared note inherits", "inherited" in (pg.text_content("#items-page .thr-note") or ""))
+
+    # review stepper: writes review_rating, refuses to cross the notify tier,
+    # and resets back to inheriting.
+    rev_eff = int(pg.text_content("#items-page .rev-val"))
+    notify_eff = int(pg.text_content("#items-page .thr-val"))
+    rev_down = rev_eff > 1
+    pg.click("#items-page [data-rev-dec]" if rev_down else "#items-page [data-rev-inc]")
+    pg.wait_for_timeout(700)
+    rev_want = rev_eff - 1 if rev_down else rev_eff + 1
+    check(
+        "review stepper writes review_rating",
+        key_value("review_rating") == rev_want,
+        (key_value("review_rating"), rev_want),
+    )
+    check(
+        "review stepper leaves the notify threshold alone",
+        not has_key("rating") or key_value("rating") == notify_eff,
+    )
+    check(
+        "review note shows the meaning and a reset link",
+        bool(
+            re.search(
+                r"(everything|potential|poor|good|great)",
+                pg.text_content("#items-page .rev-note") or "",
+            )
+        )
+        and visible(pg, "#items-page [data-rev-clear]"),
+        pg.text_content("#items-page .rev-note"),
+    )
+    # Push review up to the notify tier, then one more: the stepper must refuse.
+    for _ in range(6):
+        if int(pg.text_content("#items-page .rev-val")) >= int(
+            pg.text_content("#items-page .thr-val")
+        ):
+            break
+        pg.click("#items-page [data-rev-inc]")
+        pg.wait_for_timeout(500)
+    capped = int(pg.text_content("#items-page .rev-val"))
+    # Let the last accepted click's autosave land first: its "saved" message
+    # writes the same footer the refusal below has to be read from.
+    pg.wait_for_timeout(1800)
+    pg.click("#items-page [data-rev-inc]")
+    pg.wait_for_timeout(300)
+    check(
+        "review stepper refuses to pass the notify threshold",
+        int(pg.text_content("#items-page .rev-val")) == capped
+        and "review" in (pg.text_content("#item-foot") or "").lower(),
+        (capped, pg.text_content("#item-foot")),
+    )
+    pg.click("#items-page [data-rev-clear]")
+    pg.wait_for_timeout(700)
+    check("review reset removes review_rating", not has_key("review_rating"))
+    check(
+        "cleared review note inherits",
+        "inherited" in (pg.text_content("#items-page .rev-note") or ""),
+    )
+    pg.screenshot(path="/tmp/qa/item-thresholds-desktop.png", full_page=True)
+
+    # An inverted pair is rejected by the real config loader, and the form has
+    # to say so rather than autosaving something the monitor will refuse.
+    bad = cm_value(pg).replace(
+        f"[{S}]", f"[{S}]" + chr(10) + "review_rating = 5" + chr(10) + "rating = 3", 1
+    )
+    pg.evaluate("(s) => { document.querySelector('.CodeMirror').CodeMirror.setValue(s); }", bad)
+    pg.wait_for_timeout(500)
+    verdict = pg.evaluate("() => window.AIMM.config.validate()")
+    check(
+        "review above notify is rejected, naming both keys",
+        isinstance(verdict, dict)
+        and "review_rating" in str(verdict.get("error", ""))
+        and "rating" in str(verdict.get("error", "")),
+        str(verdict)[:140],
+    )
+    check(
+        "the rejection reaches the editor status line",
+        "review_rating" in (pg.text_content("#editor-status") or ""),
+        (pg.text_content("#editor-status") or "")[:120],
+    )
+    restore(pg, snapshot)
+    pg.wait_for_timeout(400)
     # source toggle: with 2+ sources it toggles; with one, the guard refuses
     n_sources = js(pg, "document.querySelectorAll('#items-page [data-src]').length")
     pg.click("#items-page [data-src=facebook]")
@@ -2066,6 +2372,30 @@ with sync_playwright() as p:
         and visible(pg, "#items-page .tog[data-toggle=enabled]"),
     )
     check("no horizontal overflow at 390: item editor", overflow(pg) <= 1, f"{overflow(pg)}px")
+    # Two steppers on one row is the tightest thing on this screen at 390px.
+    _pair = box(pg, "#items-page .r.thrpair")
+    _rev = box(pg, "#items-page .rev-val")
+    _thr = box(pg, "#items-page .thr-val")
+    check(
+        "mobile: both threshold steppers fit side by side",
+        bool(_rev and _thr and _pair)
+        and _rev["right"] <= _thr["left"]
+        and _thr["right"] <= _pair["right"] + 1
+        and overlap(_rev, _thr) == 0,
+        (_rev, _thr),
+    )
+    check(
+        "mobile: threshold steppers keep their 44x40 touch targets",
+        targets_ok("#items-page .r.thrpair .step button", 40),
+    )
+    # Label + stepper + a two-line note is ~120px; anything far past that means
+    # a note picked up the page-shell `.wrap` padding again.
+    check(
+        "mobile: the threshold row stays compact",
+        (_pair or {}).get("height", 999) <= 170,
+        (_pair or {}).get("height"),
+    )
+    pg.screenshot(path="/tmp/qa/item-thresholds-390.png")
     pg.screenshot(path="/tmp/qa/item-edit-mobile.png", full_page=True)
     pg.click("#items-page [data-act=edit]")
     pg.wait_for_timeout(400)
@@ -2099,6 +2429,14 @@ with sync_playwright() as p:
     check("mobile: log out returns to the login screen", visible(pg, "#login-screen"))
     ctx.close()
     b.close()
+
+# The two tier probes are the only cache rows this harness leaves behind, and
+# only until here.
+for _key in _probe_keys:
+    _cache.delete(_key)
+check(
+    "tier probes cleaned out of the shared cache", all(_cache.get(k) is None for k in _probe_keys)
+)
 
 # Resource-error console text omits the URL; it rides in the message location.
 errors = [

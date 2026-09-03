@@ -30,6 +30,14 @@ from .utils import (
 #     `random.uniform(*delay_range)` before every request.
 # The floor is raised to 6s here because the flat 5s this replaced was itself
 # enough to earn a temporary block on a busy config.
+# Score a listing has to reach before a notification is sent, when neither the
+# item nor its marketplace sets `rating`.
+DEFAULT_RATING: int = 3
+# Score a listing has to reach to enter the web UI's review queue, when neither
+# the item nor its marketplace sets `review_rating`. Anything below this is
+# rated once, cached, and kept out of the queue.
+DEFAULT_REVIEW_RATING: int = 3
+
 DEFAULT_REQUEST_DELAY: Tuple[int, int] = (6, 15)
 
 # How long to stop touching a marketplace after it signals a block. The only
@@ -259,6 +267,14 @@ class MarketItemCommonConfig(BaseConfig):
     # own default (see browser_market.DEFAULT_MAX_LISTINGS).
     max_listings: int | None = None
     rating: List[int] | None = None
+    # The lower of the two score tiers: a listing at or above `review_rating`
+    # enters the web UI's review queue; one at or above `rating` additionally
+    # triggers a notification. Anything below `review_rating` is rated once,
+    # cached so it is never re-rated, and otherwise left out of the way.
+    # Declared after `rating` on purpose: BaseConfig.__post_init__ runs the
+    # handle_* methods in field order, so handle_rating has already normalized
+    # `rating` to a list by the time handle_review_rating compares the two.
+    review_rating: List[int] | None = None
     prompt: str | None = None
     extra_prompt: str | None = None
     rating_prompt: str | None = None
@@ -627,6 +643,30 @@ class MarketItemCommonConfig(BaseConfig):
             raise ValueError(
                 f"Item {hilight(self.name)} rating must be one or a list of integers between 1 and 5 inclusive."
             )
+
+    def handle_review_rating(self: "MarketItemCommonConfig") -> None:
+        if self.review_rating is None:
+            return
+        if isinstance(self.review_rating, int):
+            self.review_rating = [self.review_rating]
+
+        if not all(isinstance(x, int) and x >= 1 and x <= 5 for x in self.review_rating):
+            raise ValueError(
+                f"Item {hilight(self.name)} review_rating must be one or a list of integers between 1 and 5 inclusive."
+            )
+        if self.rating is None:
+            return
+        # First-search and steady-state values are compared in their own lanes
+        # (see handle_rating: a two-element list is [first search, every search
+        # after]), so a config may loosen review on the first pass only.
+        for idx in (0, -1):
+            if self.review_rating[idx] > self.rating[idx]:
+                raise ValueError(
+                    f"Item {hilight(self.name)} review_rating {hilight(str(self.review_rating[idx]))} "
+                    f"is higher than rating {hilight(str(self.rating[idx]))}. A listing has to reach "
+                    "review_rating (the review queue) before it can reach rating (a notification), "
+                    "so review_rating must be less than or equal to rating."
+                )
 
     def handle_prompt(self: "MarketItemCommonConfig") -> None:
         if self.prompt is None:

@@ -298,6 +298,8 @@ def test_config(config_file: Callable, config_content: str, acceptable: bool) ->
         "pushbullet_token": str,
         "radius": (list, type(None)),
         "rating": (list, type(None)),
+        # The lower of the two score tiers; same normalization as `rating`.
+        "review_rating": (list, type(None)),
         "remind": (int, type(None)),
         # Randomized pacing between page loads, normalized to a [min, max]
         # pair of seconds; block_cooldown is marketplace-only.

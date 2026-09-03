@@ -765,6 +765,21 @@ class FacebookMarketplace(Marketplace):
             return tile_value
         return "" if (pdp_value or "").strip() in self._JUNK_DETAILS else pdp_value
 
+    def _merge_price(self: "FacebookMarketplace", pdp_value: str, tile_value: str | None) -> str:
+        """The search tile's price wins outright whenever the tile has one.
+
+        Vehicle detail pages carry no price element at all, so the PDP scraper
+        falls back to the first "$..." in the seller's description -- which on
+        a dealer listing is the down payment, not the price ("$550" for a
+        $5,500 Civic, "$450" for a "$3,000 | $4,200" Maxima). That value is
+        plausible, so the junk-artifact test in _prefer_tile does not catch it
+        and the wrong number survives into the cache and the UI. The tile price
+        is also the one the AI was rated against, and upstream's own search
+        loop already treats the summary page as authoritative for price, so
+        prefer it unconditionally rather than only over known junk.
+        """
+        return tile_value if tile_value else self._prefer_tile(pdp_value, None)
+
     def get_listing_details(
         self: "FacebookMarketplace",
         post_url: str,
@@ -801,7 +816,7 @@ class FacebookMarketplace(Marketplace):
         # fields vehicle PDPs scramble, and a junk price in the cache also
         # defeats the price-equality freshness check above, forcing a PDP
         # re-fetch on every single cycle.
-        details.price = self._prefer_tile(details.price, price)
+        details.price = self._merge_price(details.price, price)
         details.title = self._prefer_tile(details.title, title)
         details.location = self._prefer_tile(details.location, location)
         details.seller = self._prefer_tile(details.seller, None)

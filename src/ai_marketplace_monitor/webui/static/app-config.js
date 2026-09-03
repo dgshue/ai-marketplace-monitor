@@ -388,6 +388,11 @@
     { value: "toys", label: "Toys" },
     { value: "videogames", label: "Video games" },
   ];
+  // One sentence per tier, reused by every review_rating field in the schemas.
+  const THREE_TIER_HELP =
+    "Below this score a listing is rated once, cached and only tracked — it never reaches the review queue. " +
+    "At or above it the listing waits in Review for your decision. " +
+    "At or above the notify threshold it also sends a notification.";
   const RATING_OPTS = (first) => [
     { value: "", label: first },
     { value: "1", label: "1 — everything, no filtering" },
@@ -445,7 +450,9 @@
       { key: "radius", label: "Search radius (km)", type: "text", group: "Location", advanced: true, column: "right", help: "Comma-separated radius per city (must match search_city count)." },
       { key: "currency", label: "Currency", type: "text", advanced: true, column: "right", help: "Comma-separated currency code per city, e.g. 'USD, CAD'." },
       { key: "ai", label: "AI backends", type: "text", group: "AI evaluation", advanced: true, column: "right", help: "Comma-separated [ai.*] names." },
-      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Default (3)"), help: "Default notification threshold for every item. Items can override it." },
+      { key: "review_rating", label: "Review at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Default (3)"),
+        help: THREE_TIER_HELP + " Default review threshold for every item; items can override it." },
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Default (3)"), help: "Default notification threshold for every item. Items can override it. Must be at or above the review threshold." },
       { key: "prompt", label: "AI prompt", type: "textarea", advanced: true, column: "right", help: "Custom evaluation prompt (replaces default)." },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", advanced: true, column: "right", help: "Additional text appended before the rating prompt." },
       { key: "rating_prompt", label: "Rating prompt", type: "textarea", advanced: true, column: "right", help: "Custom rating instructions (replaces default 1–5 scale)." },
@@ -491,7 +498,9 @@
         help: "Optional. Restricts every search to one eBay category, e.g. 6001 for Cars & Trucks (the number after _sacat in a category URL). A phrase alone cannot do this: searching 'toyota' returns floor mats, badges and key fobs long before it returns a car. Works in both modes." },
       { key: "max_listings", label: "Max listings per search phrase", type: "number", column: "left",
         help: MAX_LISTINGS_HELP + " Four uncapped phrases is how one car search spent five hours rating car parts." },
-      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Default (3)"), help: "Default notification threshold for eBay items." },
+      { key: "review_rating", label: "Review at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Default (3)"),
+        help: THREE_TIER_HELP + " Default review threshold for eBay items." },
+      { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Default (3)"), help: "Default notification threshold for eBay items. Must be at or above the review threshold." },
       { key: "notify", label: "Notify users", type: "text", column: "right", help: "Comma-separated [user.*] names." },
       { key: "search_interval", label: "Search interval", type: "text", column: "right", help: "e.g. '30m'. The Browse API allows ~5000 calls/day across the whole app; browser mode is scraped in the shared browser, so be polite." },
       { key: "max_search_interval", label: "Max search interval", type: "text", column: "right", advanced: true },
@@ -504,6 +513,7 @@
     ],
     "marketplace.depop": [
       { key: "enabled", label: "Enabled", type: "checkbox", headerToggle: true },
+      { key: "review_rating", label: "Review at AI rating ≥", type: "select", coerce: "int", column: "left", options: RATING_OPTS("Default (3)").filter((o) => !["1", "2"].includes(o.value)), help: THREE_TIER_HELP },
       { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "left", options: RATING_OPTS("Default (3)").filter((o) => !["1", "2"].includes(o.value)) },
       { key: "notify", label: "Notify users", type: "text", column: "left" },
       { key: "search_interval", label: "Search interval", type: "text", column: "left", help: "e.g. '1h'. Scraped in the shared browser — be polite." },
@@ -513,6 +523,7 @@
     ],
     "marketplace.poshmark": [
       { key: "enabled", label: "Enabled", type: "checkbox", headerToggle: true },
+      { key: "review_rating", label: "Review at AI rating ≥", type: "select", coerce: "int", column: "left", options: RATING_OPTS("Default (3)").filter((o) => !["1", "2"].includes(o.value)), help: THREE_TIER_HELP },
       { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "left", options: RATING_OPTS("Default (3)").filter((o) => !["1", "2"].includes(o.value)) },
       { key: "notify", label: "Notify users", type: "text", column: "left" },
       { key: "search_interval", label: "Search interval", type: "text", column: "left", help: "e.g. '1h'. Scraped in the shared browser — be polite." },
@@ -539,8 +550,10 @@
       { key: "exclude_sellers", label: "Exclude sellers", type: "text", column: "right", advanced: true },
       { key: "notify", label: "Notify users", type: "text", column: "right", advanced: true, help: "Comma-separated [user.*] names. Default: inherit from marketplace." },
       { key: "ai", label: "AI backends", type: "text", group: "AI", column: "right", advanced: true },
+      { key: "review_rating", label: "Review at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Inherit from marketplace (default 3)"),
+        help: THREE_TIER_HELP + " Blank inherits the marketplace value. It may never be higher than the notify threshold below — that config is rejected." },
       { key: "rating", label: "Notify at AI rating ≥", type: "select", coerce: "int", column: "right", options: RATING_OPTS("Inherit from marketplace (default 3)"),
-        help: "The notification threshold. Listings the AI scores below this are logged and shown in Review as below threshold, but never notified." },
+        help: "The notification threshold. Listings between the review threshold and this one wait in Review; listings at or above it also reach your phone." },
       { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
       { key: "rating_prompt", label: "Rating prompt", type: "textarea", column: "right", advanced: true },
@@ -1112,15 +1125,21 @@
     else label = "every " + fmtCadence(min) + "–" + fmtCadence(max);
     return { min, max, source, startAt, label };
   };
-  const inheritedThreshold = () => {
+  // Same precedence the monitor applies: the item's own value, else the last
+  // marketplace that sets one, else 3. `key` is "rating" or "review_rating".
+  const inheritedFor = (key) => {
     let inherited = 3;
     for (const mk of marketplaceSections()) {
-      let r = fieldsForSection(mk).rating;
+      let r = fieldsForSection(mk)[key];
       if (Array.isArray(r)) r = r[r.length - 1];
       if (typeof r === "number") inherited = r;
     }
     return inherited;
   };
+  const inheritedThreshold = () => inheritedFor("rating");
+  const inheritedReview = () => Math.min(inheritedFor("review_rating"), inheritedThreshold());
+  // A two-element [first search, every search after] list shows its steady state.
+  const lastOf = (v) => (Array.isArray(v) ? v[v.length - 1] : v);
   const THRESHOLD_WORDS = { 1: "everything, no filtering", 2: "potential match or better", 3: "poor match or better", 4: "good match or better", 5: "great deals only" };
 
   const INLINE_HELP = {
@@ -1141,8 +1160,8 @@
       ex: "Keep these blunt. Subtle judgements — “not mined on” — belong in the description above, where the AI can weigh them.",
     },
     threshold: {
-      hint: "Listings the AI scores below this are still fetched, rated and shown in Review as below threshold — they just never reach your phone.",
-      ex: "3 gives you nearly everything the search returns. 5 only great deals. 4 is the useful middle for something you actually want.",
+      hint: "Three tiers. Under the review score a listing is rated once, cached and only tracked. At or above it the listing waits in Review. At or above the notify score it also reaches your phone.",
+      ex: "Review 3 · notify 5 is the common pair: the 1s and 2s disappear, 3s and 4s queue up for a look, and only a great deal buzzes your phone.",
     },
     sources: {
       hint: "Which configured marketplaces this item is searched on. All of them when none is picked.",
@@ -1228,9 +1247,9 @@
     const lo = fmtPrice(f.min_price);
     const hi = fmtPrice(f.max_price);
     if (lo || hi) bits.push(`${lo || "$0"}–${hi || "∞"}`);
-    let thr = f.rating;
-    if (Array.isArray(thr)) thr = thr[thr.length - 1];
-    bits.push(`≥ ${thr || inheritedThreshold()}`);
+    const notifyThr = lastOf(f.rating) || inheritedThreshold();
+    const reviewThr = Math.min(lastOf(f.review_rating) || inheritedReview(), notifyThr);
+    bits.push(`review ≥ ${reviewThr} · notify ≥ ${notifyThr}`);
     if (f.marketplace) bits.push([].concat(f.marketplace).join(", "));
     bits.push(itemCadence(f).label);
     const sum = activitySummaryFor(section.suffix || section.name);
@@ -1261,10 +1280,14 @@
     const enabled = fields.enabled !== false;
     const phrases = [].concat(fields.search_phrases || []);
     const anti = [].concat(fields.antikeywords || []);
-    let threshold = fields.rating;
-    if (Array.isArray(threshold)) threshold = threshold[threshold.length - 1];
+    const threshold = lastOf(fields.rating);
     const inherited = inheritedThreshold();
     const effective = threshold || inherited;
+    const review = lastOf(fields.review_rating);
+    const inheritedRev = inheritedReview();
+    // Never draw a review tier above the notify tier: the config loader
+    // rejects that pair, so showing it would be showing an unsavable state.
+    const effectiveRev = Math.min(review || inheritedRev, effective);
     const bound = fields.marketplace ? [].concat(fields.marketplace) : null;
     const cadence = itemCadence(fields);
     const cadenceNote = cadence.startAt
@@ -1292,8 +1315,18 @@
       <div class="g">
         <div class="r col"><span class="lab">Description for the AI</span><textarea class="inp" data-field="description" rows="3" placeholder="Describe a good listing — the AI reads this on every candidate.">${esc(fields.description || "")}</textarea></div>
         <div class="r"><div class="l">Price range</div><input type="text" class="inp w90" data-field="min_price" value="${esc(priceVal(fields.min_price))}" placeholder="min" autocomplete="off" inputmode="numeric" /><span class="sep">to</span><input type="text" class="inp w90" data-field="max_price" value="${esc(priceVal(fields.max_price))}" placeholder="max" autocomplete="off" inputmode="numeric" /><span class="sep">USD</span></div>
-        <div class="r"><div class="l">Notify when score ≥<small class="thr-note wrap">${threshold ? `${THRESHOLD_WORDS[threshold]} · <a data-thr-clear>reset to inherit</a>` : `inherited from marketplace (≥ ${inherited} — ${THRESHOLD_WORDS[inherited]})`}</small></div>
-          <span class="step"><button data-thr-dec aria-label="Lower threshold">−</button><b class="thr-val ${threshold ? "" : "inh"}" data-thr="${effective}">${effective}</b><button data-thr-inc aria-label="Raise threshold">+</button></span></div>
+        <div class="r thrpair">
+          <div class="thrcol">
+            <span class="thrlab">Review when score ≥</span>
+            <span class="step"><button data-rev-dec aria-label="Lower review threshold">−</button><b class="rev-val ${review ? "" : "inh"}" data-rev="${effectiveRev}">${effectiveRev}</b><button data-rev-inc aria-label="Raise review threshold">+</button></span>
+            <small class="rev-note">${review ? `${THRESHOLD_WORDS[effectiveRev]} · <a data-rev-clear>reset to inherit</a>` : `inherited (≥ ${effectiveRev} — ${THRESHOLD_WORDS[effectiveRev]})`}</small>
+          </div>
+          <div class="thrcol">
+            <span class="thrlab">Notify when score ≥</span>
+            <span class="step"><button data-thr-dec aria-label="Lower threshold">−</button><b class="thr-val ${threshold ? "" : "inh"}" data-thr="${effective}">${effective}</b><button data-thr-inc aria-label="Raise threshold">+</button></span>
+            <small class="thr-note">${threshold ? `${THRESHOLD_WORDS[threshold]} · <a data-thr-clear>reset to inherit</a>` : `inherited from marketplace (≥ ${inherited} — ${THRESHOLD_WORDS[inherited]})`}</small>
+          </div>
+        </div>
         <button class="r tap" data-act="edit"><div class="l">More settings<small>condition, category, keywords, region, AI prompt, start times…</small></div><span class="chev">›</span></button>
       </div>
       ${helpBlock("threshold")}
@@ -1371,13 +1404,35 @@
     if (e.target.closest("[data-toggle=enabled]")) return applyInline(sectionName, "enabled", fields.enabled === false);
 
     if (e.target.closest("[data-thr-dec], [data-thr-inc], [data-thr-clear]")) {
-      let current = fields.rating;
-      if (Array.isArray(current)) current = current[current.length - 1];
+      const current = lastOf(fields.rating);
       const effective = current || inheritedThreshold();
       if (e.target.closest("[data-thr-clear]")) return applyInline(sectionName, "rating", null);
+      // The notify tier cannot drop under the review tier; the config loader
+      // rejects that pair, so the stepper refuses instead of writing it.
+      const floor = Math.min(lastOf(fields.review_rating) || inheritedReview(), 5);
       const next = Math.max(1, Math.min(5, effective + (e.target.closest("[data-thr-inc]") ? 1 : -1)));
+      if (next < floor) {
+        setFoot(`Notify cannot be lower than review (≥ ${floor}) — lower the review threshold first.`, true);
+        toast("Notify cannot be lower than review", { error: true });
+        return;
+      }
       if (next === effective && current) return;
       return applyInline(sectionName, "rating", next);
+    }
+
+    if (e.target.closest("[data-rev-dec], [data-rev-inc], [data-rev-clear]")) {
+      const current = lastOf(fields.review_rating);
+      const notify = lastOf(fields.rating) || inheritedThreshold();
+      const effective = Math.min(current || inheritedReview(), notify);
+      if (e.target.closest("[data-rev-clear]")) return applyInline(sectionName, "review_rating", null);
+      const next = Math.max(1, Math.min(5, effective + (e.target.closest("[data-rev-inc]") ? 1 : -1)));
+      if (next > notify) {
+        setFoot(`Review cannot be higher than notify (≥ ${notify}) — raise the notify threshold first.`, true);
+        toast("Review cannot be higher than notify", { error: true });
+        return;
+      }
+      if (next === effective && current) return;
+      return applyInline(sectionName, "review_rating", next);
     }
 
     const src = e.target.closest("[data-src]");

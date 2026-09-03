@@ -22,7 +22,12 @@ from .ai import (
 from .depop import DepopMarketplace
 from .ebay import EbayMarketplace
 from .facebook import FacebookMarketplace
-from .marketplace import Marketplace, TItemConfig, TMarketplaceConfig
+from .marketplace import (
+    DEFAULT_RATING,
+    Marketplace,
+    TItemConfig,
+    TMarketplaceConfig,
+)
 from .notification import NotificationConfig
 from .poshmark import PoshmarkMarketplace
 from .region import RegionConfig
@@ -98,6 +103,7 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
         self.expand_notifications(logger)
         self.expand_regions()
         self.validate_items()
+        self.validate_thresholds()
 
     def get_translator_config(self: "Config", config: Dict[str, Any]) -> None:
         if not isinstance(config.get("translation", {}), dict):
@@ -335,6 +341,33 @@ class Config(Generic[TAIConfig, TItemConfig, TMarketplaceConfig]):
                         config.city_name.append(city_name)
                         config.radius.append(radius)
                         config.currency.append(currency)
+
+    def validate_thresholds(self: "Config") -> None:
+        """Reject a review threshold that sits above the notification threshold.
+
+        Each section already checks its own pair in handle_review_rating, but
+        the two keys resolve independently -- an item may set `review_rating`
+        while its notification threshold still comes from the marketplace -- so
+        the effective pair has to be checked once precedence is known.
+        """
+        for item_config in self.item.values():
+            for marketplace_config in self.marketplace.values():
+                if not item_config.searches_on(marketplace_config.name):
+                    continue
+                review = item_config.review_rating or marketplace_config.review_rating
+                notify = item_config.rating or marketplace_config.rating or [DEFAULT_RATING] * 2
+                if not review:
+                    continue
+                for idx in (0, -1):
+                    if review[idx] > notify[idx]:
+                        raise ValueError(
+                            f"Item {hilight(item_config.name)} on marketplace "
+                            f"{hilight(marketplace_config.name)} resolves to review_rating "
+                            f"{hilight(str(review[idx]))} and rating {hilight(str(notify[idx]))}. "
+                            "A listing has to reach review_rating (the review queue) before it "
+                            "can reach rating (a notification), so review_rating must be less "
+                            "than or equal to rating."
+                        )
 
     def validate_items(self: "Config") -> None:
         # if item is specified in other section, they must exist

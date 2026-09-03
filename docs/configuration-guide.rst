@@ -275,13 +275,30 @@ to describe suspicious listings in a marketplace, and:
 Rating Thresholds
 ----------------
 
-When AI services are used, the program by default notifies you of all listing with a rating of 3 or higher. You can change this behavior by setting for example:
+Every listing the AI scores falls into one of three tiers, set by two options:
+
+* Below ``review_rating`` -- the listing is rated once and the rating is cached, so it is never
+  fetched or rated again. It does not appear in the web UI's review queue; it is reachable only
+  through the **Low** chip in the All view.
+* At or above ``review_rating`` -- the listing enters the review queue for you to keep or dismiss.
+* At or above ``rating`` -- the listing also triggers a notification.
+
+Both default to ``3``, so out of the box every listing scoring 3 or better is both reviewable and
+notified, exactly as before. ``review_rating`` must be less than or equal to ``rating``; a config
+that sets it higher is rejected with an error naming both values.
+
+Both options may be given on a ``marketplace`` section (the default for every item searched there)
+and overridden on any ``item`` section. To stop hearing about anything but a great deal while still
+collecting the merely interesting for later:
 
 .. code-block:: toml
 
-    rating = 4
+    [marketplace.facebook]
+    review_rating = 3
+    rating = 5
 
-to see only listings that match your criteria well. Note that all listings after non-AI-based filtering will be returned if no AI service is specified or non-functional.
+Note that all listings after non-AI-based filtering will be returned if no AI service is specified
+or non-functional.
 
 Advanced Keyword-Based Filters
 ==============================
@@ -529,7 +546,7 @@ For example:
 First and Subsequent Searches
 =============================
 
-You can specify a list of two values for the options ``rating``, ``availability``, ``date_listed``, and ``delivery_method``. The first value is used for the initial search, and the second value is used for all subsequent searches. This allows different search strategies for first-time versus ongoing monitoring.
+You can specify a list of two values for the options ``rating``, ``review_rating``, ``availability``, ``date_listed``, and ``delivery_method``. The first value is used for the initial search, and the second value is used for all subsequent searches. This allows different search strategies for first-time versus ongoing monitoring.
 
 For example, to perform an initial lenient search for all listings followed by searches for only new listings:
 

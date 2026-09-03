@@ -56,10 +56,19 @@ CONCLUSIONS: Dict[int, str] = {
 
 # monitor.py's fallback when neither the item nor the marketplace sets `rating`.
 DEFAULT_THRESHOLD = 3
+# ... and when neither sets `review_rating`. Three tiers, lowest first:
+#   score <  review threshold  -> tracked only, never queued (verdict "low")
+#   score >= review threshold  -> enters the review queue     (verdict "promising")
+#   score >= notify threshold  -> also notified               (verdict "notified")
+DEFAULT_REVIEW_THRESHOLD = 3
 
 VERDICT_NOTIFIED = "notified"
 VERDICT_PROMISING = "promising"
+# Retained for compatibility with anything that stored the old value. The band
+# it used to name -- rated, but under the notification threshold -- is now
+# split between "promising" (at or above the review threshold) and "low".
 VERDICT_DISMISSED = "dismissed"
+VERDICT_LOW = "low"
 
 
 def _rating_floor(value: Any) -> Optional[int]:
@@ -81,8 +90,13 @@ def _rating_floor(value: Any) -> Optional[int]:
 
 def thresholds_from_config(
     config_files: Iterable[Path],
-) -> Tuple[Dict[str, int], int, set]:
-    """Return (threshold per item name, marketplace-wide default).
+) -> Tuple[Dict[str, int], int, set, Dict[str, int], int]:
+    """Resolve both score tiers per item.
+
+    Returns (notify threshold per item, marketplace-wide notify default,
+    disabled item names, review threshold per item, marketplace-wide review
+    default). Both keys follow the same precedence the monitor applies: the
+    item's own value, else the marketplace's, else 3.
 
     Every configured item gets an entry, not only those that set `rating` --
     build_activity also uses the key set as the candidate item names for the
@@ -94,8 +108,11 @@ def thresholds_from_config(
     """
     per_item: Dict[str, int] = {}
     explicit: Dict[str, int] = {}
+    per_item_review: Dict[str, int] = {}
+    explicit_review: Dict[str, int] = {}
     disabled: set = set()
     fallback = DEFAULT_THRESHOLD
+    fallback_review = DEFAULT_REVIEW_THRESHOLD
     for path in config_files:
         try:
             with open(path, "rb") as handle:
@@ -109,19 +126,30 @@ def thresholds_from_config(
                     floor = _rating_floor(section.get("rating"))
                     if floor is not None:
                         fallback = floor
+                    floor = _rating_floor(section.get("review_rating"))
+                    if floor is not None:
+                        fallback_review = floor
         items = data.get("item")
         if isinstance(items, dict):
             for name, section in items.items():
                 per_item[str(name)] = DEFAULT_THRESHOLD
+                per_item_review[str(name)] = DEFAULT_REVIEW_THRESHOLD
                 if isinstance(section, dict):
                     floor = _rating_floor(section.get("rating"))
                     if floor is not None:
                         explicit[str(name)] = floor
+                    floor = _rating_floor(section.get("review_rating"))
+                    if floor is not None:
+                        explicit_review[str(name)] = floor
                     if section.get("enabled") is False:
                         disabled.add(str(name))
     for name in per_item:
         per_item[name] = explicit.get(name, fallback)
-    return per_item, fallback, disabled
+        # A review threshold above the notify threshold is rejected by the
+        # config loader, but this parser never validates -- clamp so a
+        # half-edited file cannot empty the queue.
+        per_item_review[name] = min(explicit_review.get(name, fallback_review), per_item[name])
+    return per_item, fallback, disabled, per_item_review, fallback_review
 
 
 def home_from_config(config_files: Iterable[Path]) -> Optional[Coordinates]:
@@ -252,7 +280,13 @@ def build_activity(
 ) -> Dict[str, Any]:
     """Join the cache into per-listing review rows plus per-item totals."""
     config_files = list(config_files)
-    per_item_threshold, default_threshold, disabled_items = thresholds_from_config(config_files)
+    (
+        per_item_threshold,
+        default_threshold,
+        disabled_items,
+        per_item_review,
+        default_review,
+    ) = thresholds_from_config(config_files)
     home = home_from_config(config_files)
     ratings = _collect_ratings(local_cache)
     by_listing = _collect_by_listing(local_cache)
@@ -265,7 +299,10 @@ def build_activity(
     seen_hashes: Set[Any] = set()
     # Item names to try when re-hashing a cached listing, each with the
     # threshold that applies to it.
-    candidates: List[Tuple[str, int]] = sorted(per_item_threshold.items())
+    candidates: List[Tuple[str, int, int]] = sorted(
+        (name, threshold, per_item_review.get(name, default_review))
+        for name, threshold in per_item_threshold.items()
+    )
 
     for key in local_cache.iterkeys():
         if not isinstance(key, tuple) or not key:
@@ -289,7 +326,7 @@ def build_activity(
         # name to find the pairing, which also recovers the item attribution
         # that the cached row lost.
         details = asdict(listing)
-        for item, threshold in candidates:
+        for item, threshold, review_threshold in candidates:
             ident = (listing.marketplace, listing.id, item)
             if ident in seen_hashes:
                 continue
@@ -315,12 +352,15 @@ def build_activity(
                 continue
             seen_hashes.add(listing_hash)
 
+            # Three tiers. "low" is the one the UI keeps out of the queue,
+            # the Reviewed list and the day's counts: it was rated once, the
+            # rating is cached forever, and that is all it costs from here on.
             if (listing.marketplace, listing.id) in notified:
                 verdict = VERDICT_NOTIFIED
-            elif score >= threshold:
+            elif score >= review_threshold:
                 verdict = VERDICT_PROMISING
             else:
-                verdict = VERDICT_DISMISSED
+                verdict = VERDICT_LOW
 
             rows.append(
                 {
@@ -346,6 +386,7 @@ def build_activity(
                     # older rows sort last under "newest".
                     "rated_at": rating.get("rated_at"),
                     "threshold": threshold,
+                    "review_threshold": review_threshold,
                     "verdict": verdict,
                     "notified_at": notified.get((listing.marketplace, listing.id), ""),
                     # The user's own read on the listing, orthogonal to the AI's.
@@ -383,13 +424,17 @@ def build_activity(
                 "item": row["item"],
                 "examined": 0,
                 "dismissed": 0,
+                "low": 0,
                 "promising": 0,
                 "notified": 0,
                 "threshold": row["threshold"],
+                "review_threshold": row["review_threshold"],
                 "best_score": 0,
                 "active": row["item_active"],
             },
         )
+        # `examined` counts every rating on record, low ones included -- it is
+        # the AI-cost number. The queue-facing counts live in the sibling keys.
         bucket["examined"] += 1
         bucket[row["verdict"]] += 1
         bucket["best_score"] = max(bucket["best_score"], row["score"])

@@ -20,6 +20,8 @@ from .config import Config, supported_ai_backends, supported_marketplaces
 from .listing import Listing
 from .marketplace import (
     DEFAULT_BLOCK_COOLDOWN,
+    DEFAULT_RATING,
+    DEFAULT_REVIEW_RATING,
     BlockTracker,
     Marketplace,
     MarketplaceBlockedError,
@@ -468,6 +470,26 @@ class MarketplaceMonitor:
             "paused_persisted": bool(read_monitor_state().get("paused")),
         }
 
+    @staticmethod
+    def _threshold_for(
+        key: str,
+        item_config: TItemConfig,
+        marketplace_config: TMarketplaceConfig,
+        default: int,
+    ) -> int:
+        """Resolve a score threshold: item, then marketplace, then the default.
+
+        A two-element list means [first search, every search after], so the
+        first-ever pass on an item may use a looser (or stricter) value than
+        its steady state.
+        """
+        idx = 0 if item_config.searched_count == 0 else -1
+        for config in (item_config, marketplace_config):
+            values = getattr(config, key, None)
+            if values:
+                return int(values[idx])
+        return default
+
     def _search_item_impl(
         self: "MarketplaceMonitor",
         marketplace_config: TMarketplaceConfig,
@@ -550,29 +572,35 @@ class MarketplaceMonitor:
                             item=item_config.name,
                         ),
                     )
-            if item_config.rating:
-                acceptable_rating = item_config.rating[
-                    0 if item_config.searched_count == 0 else -1
-                ]
-            elif marketplace_config.rating:
-                acceptable_rating = marketplace_config.rating[
-                    0 if item_config.searched_count == 0 else -1
-                ]
-            else:
-                acceptable_rating = 3
+            acceptable_rating = self._threshold_for(
+                "rating", item_config, marketplace_config, DEFAULT_RATING
+            )
+            review_rating = self._threshold_for(
+                "review_rating", item_config, marketplace_config, DEFAULT_REVIEW_RATING
+            )
 
             if res.score < acceptable_rating:
                 if self.logger:
+                    # Two tiers below the notification threshold: at or above
+                    # review_rating the listing still reaches the web UI's
+                    # review queue, below it the rating is cached and forgotten.
+                    reviewable = res.score >= review_rating
+                    tail = (
+                        f"""below the notify threshold {acceptable_rating}; kept for review."""
+                        if reviewable
+                        else f"""below the review threshold {review_rating}; tracked only."""
+                    )
                     self.logger.info(
-                        f"""{hilight("[Skip]", "fail")} Rating {hilight(f"{res.conclusion} ({res.score})")} for {listing.title} is below threshold {acceptable_rating}.""",
+                        f"""{hilight("[Skip]", "fail")} Rating {hilight(f"{res.conclusion} ({res.score})")} for {listing.title} is {tail}""",
                         extra=aimm_event(
                             "listing_skip",
-                            reason="below_threshold",
+                            reason="below_threshold" if reviewable else "below_review_threshold",
                             listing_id=listing.id,
                             title=listing.title,
                             item=item_config.name,
                             score=res.score,
                             threshold=acceptable_rating,
+                            review_threshold=review_rating,
                         ),
                     )
                 counter.increment(CounterItem.EXCLUDED_LISTING, item_config.name)

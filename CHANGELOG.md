@@ -15,8 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forms, sources set-up, status, logs, CSV export, noVNC link) is carried over.
 
 ### Added
+- Option `review_rating` (marketplace-level, overridable per item, 1-5, default 3) splitting the AI score
+  into three tiers: below `review_rating` a listing is rated once, cached and only tracked; at or above it
+  the listing enters the web UI's review queue; at or above `rating` it also sends a notification.
+  A config with `review_rating` above `rating` is rejected with an error naming both. Activity rows and the
+  per-item summary carry `review_threshold`, the new verdict `low` covers the bottom tier, and the review
+  queue, the Reviewed list, the tab badge, the "N to review" line and the day counts all exclude it — the
+  All view's new **Low** chip is the one place it surfaces. Item cards show both thresholds as steppers.
 - `/api/listing/flag` accepts `kept`; user flags now carry `reviewed_at`, and activity rows expose both,
   so the review queue is derived from the user's own decisions (kept, hidden, or rated).
+
+### Fixed
+- Facebook vehicle listings cached a wrong price: vehicle detail pages have no price element, so the
+  detail scraper fell back to the first `$...` in the seller's description — the down payment on a dealer
+  listing (`$550` for a $5,500 Civic). The value is plausible, so the junk-artifact filter let it through.
+  The search tile's price, which is what the AI was rated against, now wins outright whenever the tile has
+  one. Already-cached listings self-heal on their next encounter.
 
 ## [0.10.2] - 2026-07-17
 
