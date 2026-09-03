@@ -134,6 +134,50 @@ def overflow(pg):
     return js(pg, "document.documentElement.scrollWidth - document.documentElement.clientWidth")
 
 
+BOX = "(sel) => { const e = document.querySelector(sel); return e ? JSON.parse(JSON.stringify(e.getBoundingClientRect())) : null; }"
+
+
+def box(pg, sel):
+    """Client rect of the first match, or None (the name `rect` is taken)."""
+    return js(pg, BOX, sel)
+
+
+def overlap(a, b):
+    """Overlapping area of two client rects (0 when they merely touch)."""
+    if not a or not b:
+        return 0.0
+    w = min(a["right"], b["right"]) - max(a["left"], b["left"])
+    h = min(a["bottom"], b["bottom"]) - max(a["top"], b["top"])
+    return max(0.0, w) * max(0.0, h)
+
+
+# Anything the browser will let scroll sideways must have asked for it: a rail
+# or pane that scrolls horizontally is always a layout bug, and only the opt-in
+# strips (chip rows, the log table, CodeMirror) may exceed their own width.
+SIDEWAYS = """() => Array.from(document.querySelectorAll('body *')).filter(el => {
+  const s = getComputedStyle(el);
+  if (!['auto', 'scroll'].includes(s.overflowX)) return false;
+  if (el.scrollWidth <= el.clientWidth + 1) return false;
+  return !el.classList.contains('chips') && !el.closest('.CodeMirror') && !el.closest('.logs');
+}).map(el => (el.id || el.tagName) + '.' + (el.className || '').toString().slice(0, 30)
+  + ' ' + el.scrollWidth + '>' + el.clientWidth)"""
+
+
+def open_desktop_detail(pg):
+    """Sign in on a fresh desktop context and expand the first queue card."""
+    pg.goto(BASE + "/", wait_until="load")
+    pg.wait_for_timeout(900)
+    if visible(pg, "#login-fields"):
+        pg.fill("input[name=username]", "t@e.com")
+        pg.fill("input[name=password]", "pw")
+        pg.click("#login-submit")
+    pg.wait_for_timeout(4500)
+    pg.click("#rail .lrow")
+    pg.wait_for_timeout(400)
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(2500)
+
+
 def cm_value(pg):
     return js(pg, "document.querySelector('.CodeMirror').CodeMirror.getValue()")
 
@@ -1521,6 +1565,12 @@ with sync_playwright() as p:
     pg.screenshot(path="/tmp/qa/status-desktop.png", full_page=True)
 
     # ---------- block state: rendered from a stubbed payload ----------
+    # loadMonitorState() polls every 10s and replaces state.monitorInfo; park
+    # it (a truthy sentinel keeps it from re-arming) so the stubs below survive.
+    js(
+        pg,
+        "() => { clearInterval(window.AIMM.state._monitorPoll); window.AIMM.state._monitorPoll = -1; }",
+    )
     block_probe = js(
         pg,
         """() => {
@@ -1674,6 +1724,143 @@ with sync_playwright() as p:
     ctx.close()
 
     # =====================================================================
+    # Triage layout pass (1419x907, 1280x800): an expanded queue card is
+    # taller than the viewport, so the card body must scroll under a pinned
+    # action bar, and nothing may scroll sideways.
+    # =====================================================================
+    for vw, vh in ((1419, 907), (1280, 800)):
+        tag = f"{vw}x{vh}"
+        ctx = b.new_context(viewport={"width": vw, "height": vh})
+        pg = ctx.new_page()
+        pg.on(
+            "console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", "")))
+        )
+        pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
+        open_desktop_detail(pg)
+        check(f"{tag}: queue card expands to its detail", visible(pg, "#detail-pane"))
+        check(
+            f"{tag}: three-column panes carry min-height 0",
+            js(
+                pg,
+                "['#rail', '#review-center', '#keys'].every(s => getComputedStyle(document.querySelector(s)).minHeight === '0px')",
+            ),
+        )
+        railw = js(
+            pg,
+            "(() => { const r = document.querySelector('#rail'); return [r.scrollWidth, r.clientWidth]; })()",
+        )
+        check(
+            f"{tag}: rail never scrolls sideways",
+            railw[0] <= railw[1] + 1,
+            f"{railw[0]}>{railw[1]}",
+        )
+        pills = js(
+            pg,
+            "(() => { const h = document.querySelector('#item-pills'); const r = document.querySelector('#rail').getBoundingClientRect(); return [h.scrollWidth <= h.clientWidth + 1, Array.from(h.children).every(c => c.getBoundingClientRect().right <= r.right + 1)]; })()",
+        )
+        check(f"{tag}: item pills wrap inside the rail", pills[0] and pills[1], pills)
+        sideways = js(pg, SIDEWAYS)
+        check(f"{tag}: no pane scrolls horizontally", not sideways, sideways[:3])
+
+        body_css = js(
+            pg, "getComputedStyle(document.querySelector('#detail-pane .dbody')).overflowY"
+        )
+        check(
+            f"{tag}: detail body is the scroll container", body_css in ("auto", "scroll"), body_css
+        )
+        sh, ch = js(
+            pg,
+            "(() => { const b = document.querySelector('#detail-pane .dbody'); return [b.scrollHeight, b.clientHeight]; })()",
+        )
+        check(f"{tag}: detail content is taller than the pane", sh > ch + 20, f"{sh} > {ch}")
+        pg.screenshot(path=f"/tmp/qa/detail-expanded-{vw}.png")
+        moved = js(
+            pg,
+            "(() => { const b = document.querySelector('#detail-pane .dbody'); const a = b.scrollTop; b.scrollTop = a + 400; return [a, b.scrollTop]; })()",
+        )
+        pg.wait_for_timeout(300)
+        check(f"{tag}: scrolling the detail by 400px moves it", moved[1] - moved[0] >= 380, moved)
+        bar = box(pg, "#detail-pane .actbar")
+        check(
+            f"{tag}: action bar stays in the viewport after scrolling",
+            bool(bar) and bar["top"] >= 0 and bar["bottom"] <= vh + 1 and bar["height"] > 40,
+            ("top=%.0f bottom=%.0f vh=%d" % (bar["top"], bar["bottom"], vh)) if bar else "MISSING",
+        )
+        # The reasoning used to be clipped under the action bar; scrolled to
+        # the end it must sit fully above it.
+        js(
+            pg,
+            "() => { const b = document.querySelector('#detail-pane .dbody'); b.scrollTop = b.scrollHeight; }",
+        )
+        pg.wait_for_timeout(300)
+        why = box(pg, "#detail-pane .why2")
+        rate = box(pg, "#detail-pane .rate5")
+        bar = box(pg, "#detail-pane .actbar")
+        check(
+            f"{tag}: reasoning and rating clear the action bar at the end of the scroll",
+            bool(why and rate and bar)
+            and rate["bottom"] <= bar["top"] + 1
+            and why["bottom"] <= bar["top"] + 1,
+            (
+                ("why=%.0f rate=%.0f bar=%.0f" % (why["bottom"], rate["bottom"], bar["top"]))
+                if (why and rate and bar)
+                else "MISSING"
+            ),
+        )
+        pg.screenshot(path=f"/tmp/qa/detail-scrolled-{vw}.png")
+        check(
+            f"no horizontal overflow at {vw}: detail open", overflow(pg) <= 1, f"{overflow(pg)}px"
+        )
+
+        before_key = js(pg, "window.AIMM.review.cursor")
+        pg.keyboard.press("j")
+        pg.wait_for_timeout(800)
+        check(
+            f"{tag}: J/K still move the cursor with the detail open",
+            js(pg, "window.AIMM.review.cursor") != before_key and visible(pg, "#detail-pane"),
+        )
+        pg.keyboard.press("k")
+        pg.wait_for_timeout(800)
+
+        # Score badge vs price: with the photo, and with it gone (onerror).
+        check(
+            f"{tag}: score badge clear of the price (photo present)",
+            overlap(box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")) == 0,
+            [box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")],
+        )
+        had_photo = js(pg, "!!document.querySelector('#detail-pane .ph img')")
+        if had_photo:
+            js(
+                pg,
+                "() => document.querySelector('#detail-pane .ph img').dispatchEvent(new Event('error'))",
+            )
+            pg.wait_for_timeout(300)
+        check(
+            f"{tag}: a failed photo takes its whole block (and its badge) with it",
+            not js(pg, "!!document.querySelector('#detail-pane .ph')"),
+            "" if had_photo else "no photo to fail",
+        )
+        no_ph = js(
+            pg,
+            "(() => { const p = document.querySelector('#detail-pane'); const g = e => e ? JSON.parse(JSON.stringify(e.getBoundingClientRect())) : null; return {sc: g(p.querySelector('.ph .sc')), badge: g(p.querySelector('.badges .sc')), price: g(p.querySelector('.price'))}; })()",
+        )
+        check(
+            f"{tag}: score badge sits inline, clear of the price, with no photo",
+            no_ph["sc"] is None
+            and bool(no_ph["badge"])
+            and overlap(no_ph["badge"], no_ph["price"]) == 0
+            and no_ph["badge"]["top"] >= no_ph["price"]["bottom"] - 1,
+            no_ph,
+        )
+        for view in ("review", "items", "sources", "status"):
+            go(pg, view)
+            pg.wait_for_timeout(300)
+            check(
+                f"no horizontal overflow at {vw}: {view}", overflow(pg) <= 1, f"{overflow(pg)}px"
+            )
+        ctx.close()
+
+    # =====================================================================
     # Phone pass (390x844): tabs, swipe, detail, lists, settings screens
     # =====================================================================
     ctx = b.new_context(
@@ -1772,6 +1959,47 @@ with sync_playwright() as p:
         targets_ok("#detail-pane .actbar .btn") and targets_ok("#detail-pane .rate5 button"),
     )
     check("no horizontal overflow at 390: detail", overflow(pg) <= 1, f"{overflow(pg)}px")
+    check(
+        "mobile: score badge clear of the price (photo present)",
+        overlap(box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")) == 0,
+    )
+    check(
+        "mobile: nothing in the detail sheet scrolls sideways",
+        not js(pg, SIDEWAYS),
+        js(pg, SIDEWAYS)[:3],
+    )
+    pg.screenshot(path="/tmp/qa/detail-sheet-390.png")
+    _had = js(pg, "!!document.querySelector('#detail-pane .ph img')")
+    if _had:
+        js(
+            pg,
+            "() => document.querySelector('#detail-pane .ph img').dispatchEvent(new Event('error'))",
+        )
+        pg.wait_for_timeout(300)
+    _mob = js(
+        pg,
+        "(() => { const p = document.querySelector('#detail-pane'); const g = e => e ? JSON.parse(JSON.stringify(e.getBoundingClientRect())) : null; return {ph: !!p.querySelector('.ph'), sc: g(p.querySelector('.ph .sc')), badge: g(p.querySelector('.badges .sc')), price: g(p.querySelector('.price'))}; })()",
+    )
+    check(
+        "mobile: a failed photo takes its whole block with it",
+        not _mob["ph"],
+        "" if _had else "no photo to fail",
+    )
+    check(
+        "mobile: score badge sits inline, clear of the price, with no photo",
+        _mob["sc"] is None and bool(_mob["badge"]) and overlap(_mob["badge"], _mob["price"]) == 0,
+        _mob,
+    )
+    check(
+        "no horizontal overflow at 390: detail without a photo",
+        overflow(pg) <= 1,
+        f"{overflow(pg)}px",
+    )
+    # Re-open the sheet so the shot below shows the real (photo-bearing) detail.
+    pg.click("#detail-back")
+    pg.wait_for_timeout(400)
+    pg.click("#act-details")
+    pg.wait_for_timeout(1200)
     pg.screenshot(path="/tmp/qa/detail-mobile.png", full_page=True)
     pg.click("#detail-back")
     pg.wait_for_timeout(300)

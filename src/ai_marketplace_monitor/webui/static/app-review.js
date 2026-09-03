@@ -45,6 +45,13 @@
     photoUrl(row)
       ? `<img src="${esc(photoUrl(row))}" alt="${esc(alt || "listing photo")}" loading="lazy" onerror="this.remove()" />`
       : "";
+  // The detail hero. The score badge is positioned over the photo, so when
+  // there is no photo — none recorded, or the fetch 404s and onerror fires —
+  // the whole block goes and the inline badge in .badges carries the score.
+  const detailPhoto = (row) =>
+    photoUrl(row)
+      ? `<div class="ph"><img src="${esc(photoUrl(row))}" alt="${esc(row.title || "listing photo")}" onerror="this.parentElement.remove()" /><span class="sc ${scoreClass(row.score)}">${row.score} / 5</span>${srcGlyph(row.marketplace)}</div>`
+      : "";
   const priceText = (row) => (row.price && row.price !== "**unspecified**" ? row.price : "—");
   const startOfToday = () => {
     const d = new Date();
@@ -545,7 +552,8 @@
         <span class="t">${typeof pos === "number" ? `${pos} of ${total}` : pos} · ${esc(row.item)} · ${esc(marketLabel(row.marketplace))}</span>
         <button class="ib" id="detail-next" aria-label="Next" title="Next (J)"><svg class="icon" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
       </div>
-      <div class="ph">${photoImg(row)}${photoUrl(row) ? "" : "no photo"}<span class="sc ${scoreClass(row.score)}">${row.score} / 5</span>${srcGlyph(row.marketplace)}</div>
+      <div class="dbody">
+      ${detailPhoto(row)}
       <div class="sec">
         <div class="price">${esc(priceText(row))}${row.my_rank ? `<span class="tag keep">★ ${row.my_rank} mine</span>` : ""}</div>
         <h2>${esc(row.title)}</h2>
@@ -560,6 +568,7 @@
         <div class="why2 ${whyClass(row.score)}"><div class="hd"><span class="sc ${scoreClass(row.score)}">${row.score}</span>${esc(row.conclusion)}</div>${esc(row.comment || "(no reasoning recorded)")}</div></div>
       <div class="sec"><h4>My rating <span class="sub">· press 1–5 · same key clears</span></h4>
         <div class="rate5" data-flag="rank">${[1, 2, 3, 4, 5].map((n) => `<button class="star ${row.my_rank === n ? "on" : ""}" data-rank="${n}">${row.my_rank >= n ? "★" : n}<small>${RATE[n - 1]}</small></button>`).join("")}</div></div>
+      </div>
       <div class="actbar">
         <button class="btn no" data-flag="hide" id="dd-dismiss">${row.hidden ? "↶ Restore" : "✕ Dismiss"}</button>
         ${row.url ? `<a class="btn pri" id="dd-open" href="${esc(row.url)}" target="_blank" rel="noopener">Open ↗</a>` : ""}
@@ -599,6 +608,8 @@
     pane.classList.remove("hidden");
     pane.innerHTML = detailHtml(row, pos || "reviewed", rows.length);
     pane.scrollTop = 0;
+    const body = pane.querySelector(".dbody");
+    if (body) body.scrollTop = 0;
     if (!desktop) window.scrollTo(0, 0);
     mountMap(row);
   };

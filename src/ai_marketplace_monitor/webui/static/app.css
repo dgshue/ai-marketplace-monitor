@@ -329,6 +329,10 @@ textarea.inp { min-height: 88px; padding: 10px 12px; line-height: 1.45; resize: 
 
 /* ---------- detail ---------- */
 .detail { display: flex; flex-direction: column; min-height: 100vh; background: var(--bg); }
+/* The card is a column flexbox: nothing inside it may be squeezed by the
+   available height (a shrunk .ph collapses under its absolute score badge). */
+.detail > * { flex: 0 0 auto; }
+.detail .dbody { display: block; }
 .detail .dbar {
   position: sticky; top: 0; z-index: 20; background: #0e1117f2; backdrop-filter: blur(10px); display: flex; align-items: center; gap: 6px;
   padding: calc(8px + var(--sat)) 8px 6px;
@@ -557,7 +561,13 @@ textarea.aimm-editor { width: 100%; height: 100%; background: var(--sur); color:
   .mchip { display: none; }
   .view { min-height: calc(100vh - 56px); }
   .three { display: grid; grid-template-columns: 320px 1fr 250px; height: calc(100vh - 56px); }
-  .rail { display: block; border-right: 1px solid var(--bd); overflow-y: auto; background: var(--sur); }
+  .three > * { min-height: 0; min-width: 0; }
+  /* overflow-x must be explicit: `overflow-y: auto` alone computes overflow-x
+     to auto, and the swipe-to-undo slab parked at right:-96px would then give
+     the rail a horizontal scrollbar. */
+  .rail { display: block; border-right: 1px solid var(--bd); overflow-y: auto; overflow-x: hidden; background: var(--sur); }
+  .rail .lrow .undo { display: none; }
+  .rail .chips { flex-wrap: wrap; overflow-x: hidden; }
   .rail .seg { margin: 12px 12px 8px; }
   .rail .qhead { padding: 0 14px 8px; }
   .rail .lrow { min-height: 64px; padding: 8px 12px; cursor: pointer; }
@@ -572,7 +582,7 @@ textarea.aimm-editor { width: 100%; height: 100%; background: var(--sur); color:
   .rail .chips, .rail .frow { padding-left: 12px; padding-right: 12px; }
   .rail .frow .inp { min-height: 38px; font-size: 13px; }
   .rail .list-empty { padding: 30px 12px; }
-  .center { overflow-y: auto; padding: 22px 32px; display: flex; flex-direction: column; align-items: center; }
+  .center { overflow-y: auto; overflow-x: hidden; padding: 22px 32px; display: flex; flex-direction: column; align-items: center; min-height: 0; }
   .center .appbar { position: static; background: transparent; backdrop-filter: none; width: 100%; max-width: 640px; padding: 0; }
   .center .appbar .top, .center .seg, .center .qhead, .center .swipehint { display: none; }
   .center .today { padding: 0 0 12px; }
@@ -580,7 +590,7 @@ textarea.aimm-editor { width: 100%; height: 100%; background: var(--sur); color:
   .center .chips, .center .frow { padding-left: 0; padding-right: 0; }
   .wrap { width: 100%; max-width: 560px; padding: 0; min-height: 0; }
   .stack { height: 600px; }
-  .keys { display: block; border-left: 1px solid var(--bd); padding: 18px 16px; background: var(--sur); overflow-y: auto; }
+  .keys { display: block; border-left: 1px solid var(--bd); padding: 18px 16px; background: var(--sur); overflow-y: auto; overflow-x: hidden; min-height: 0; }
   .keys h4 { font-size: 12px; color: var(--mu); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
   .keys .k { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; font-size: 13px; border-bottom: 1px solid var(--bd); }
   .keys .k:last-child { border-bottom: 0; }
@@ -590,7 +600,11 @@ textarea.aimm-editor { width: 100%; height: 100%; background: var(--sur); color:
   .dkeys kbd { font-size: 11px; padding: 3px 6px; margin: 0 2px; }
   .list { width: 100%; max-width: 640px; padding: 0 0 40px; }
   .fgrid { grid-template-columns: 1fr 1fr; }
-  .detail { max-width: 640px; width: 100%; border: 1px solid var(--bd); border-radius: 18px; overflow: hidden; background: var(--sur); min-height: 0; }
+  /* The card owns the column's height and scrolls its own body, so the
+     action bar stays pinned to the bottom of the viewport while the facts,
+     map and reasoning scroll under it. */
+  .detail { max-width: 640px; width: 100%; border: 1px solid var(--bd); border-radius: 18px; overflow: hidden; background: var(--sur); min-height: 0; flex: 1 1 auto; max-height: 100%; }
+  .detail .dbody { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
   .detail .dbar { background: var(--sur); padding-top: 8px; }
   .detail .ph { height: 300px; }
   .actbar { padding-bottom: 12px; }
