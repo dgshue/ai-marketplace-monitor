@@ -1026,6 +1026,19 @@ class FacebookMarketplace(Marketplace):
             and (title is None or details.title == title)
         ):
             # if the price and title are the same, we assume everything else is unchanged.
+            #
+            # Except the photo, which may be missing rather than unchanged: a
+            # row cached before galleries were read, or one whose photo was a
+            # profile picture and has since been cleared, has nothing the UI
+            # can show. The search tile in hand does. Backfilling it costs no
+            # page load and no request, so an old listing shows its own photo
+            # again on the next pass instead of an empty frame -- it just
+            # cannot gain the rest of the gallery, which only ever exists on
+            # the listing page this branch is avoiding.
+            if not details.images and image and is_listing_photo(image):
+                details.images = [image]
+                details.image = image
+                details.to_cache(post_url)
             return details, True
 
         if not self.page:

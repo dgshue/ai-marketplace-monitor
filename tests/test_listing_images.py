@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from pytest_playwright.pytest_playwright import CreateContextCallback  # type: ignore
 
 from ai_marketplace_monitor.facebook import (
+    FacebookItemConfig,
     FacebookMarketplace,
     FacebookRegularItemPage,
     is_listing_photo,
@@ -184,6 +185,54 @@ def test_tile_photo_is_the_fallback_when_the_page_yielded_nothing() -> None:
     # ... but never a fallback to somebody's face.
     assert fb._merge_images([], AVATAR) == []
     assert fb._merge_images([], None) == []
+
+
+def test_a_cache_hit_backfills_a_missing_photo_from_the_tile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows cached before galleries existed have no photo. Fix them for free.
+
+    The listing page is never revisited when price and title still match, so
+    without this an old listing keeps an empty frame forever. It does not gain
+    the rest of the gallery -- that only exists on the page being skipped.
+    """
+    cache = Cache(str(tmp_path / "c"))
+    try:
+        import ai_marketplace_monitor.listing as listing_module
+
+        monkeypatch.setattr(listing_module, "cache", cache)
+        stale = _listing(image="", images=[])
+        stale.to_cache(stale.post_url, local_cache=cache)
+
+        fb = FacebookMarketplace.__new__(FacebookMarketplace)
+        item_config = FacebookItemConfig(name="probe", search_phrases=["x"])
+        got, from_cache = fb.get_listing_details(
+            stale.post_url,
+            item_config,
+            price=stale.price,
+            title=stale.title,
+            image=HERO,
+        )
+        assert from_cache is True
+        assert got.image == HERO and got.images == [HERO]
+        # ... and it stuck, so the web UI reads it too.
+        again = Listing.from_cache(stale.post_url, local_cache=cache)
+        assert again is not None and again.images == [HERO]
+
+        # An avatar is not a backfill.
+        blanked = _listing(image="", images=[])
+        blanked.post_url = "https://www.facebook.com/marketplace/item/43/"
+        blanked.to_cache(blanked.post_url, local_cache=cache)
+        got, _ = fb.get_listing_details(
+            blanked.post_url,
+            item_config,
+            price=blanked.price,
+            title=blanked.title,
+            image=AVATAR,
+        )
+        assert got.image == "" and got.images == []
+    finally:
+        cache.close()
 
 
 # ------------------------------------------------------------------- model

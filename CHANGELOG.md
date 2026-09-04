@@ -47,8 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and videos come from `video-*.fbcdn.net` — and images inside a seller-profile link, a link to a
   different listing, or requested at icon size are excluded. A listing with no usable photo now
   shows no photo rather than a stranger's face. Email notifications, which embed `image`, were
-  showing the same wrong pictures and are fixed by the same change. Listings re-encountered after
-  this release correct themselves; run `aimm --check <url>` on an older one to refresh it sooner.
+  showing the same wrong pictures and are fixed by the same change. Already-cached listings are
+  repaired on the next search pass, from the search tile and without an extra page load — so they
+  regain a correct photo, but only one: the rest of the gallery exists only on the listing page,
+  which a cached listing never revisits.
 - Facebook vehicle listings cached a wrong price: vehicle detail pages have no price element, so the
   detail scraper fell back to the first `$...` in the seller's description — the down payment on a dealer
   listing (`$550` for a $5,500 Civic). The value is plausible, so the junk-artifact filter let it through.
