@@ -4,7 +4,7 @@ from typing import ClassVar, List
 
 from pushbullet import Pushbullet  # type: ignore
 
-from .notification import PushNotificationConfig
+from .notification import ListingNotice, PushNotificationConfig
 from .utils import hilight
 
 
@@ -53,13 +53,8 @@ class PushbulletNotificationConfig(PushNotificationConfig):
     def handle_message_format(self: "PushbulletNotificationConfig") -> None:
         self.message_format = "plain_text"
 
-    def send_message(
-        self: "PushbulletNotificationConfig",
-        title: str,
-        message: str,
-        logger: Logger | None = None,
-    ) -> bool:
-        pb = Pushbullet(
+    def _client(self: "PushbulletNotificationConfig") -> Pushbullet:
+        return Pushbullet(
             self.pushbullet_token,
             proxy=(
                 {self.pushbullet_proxy_type: self.pushbullet_proxy_server}
@@ -68,6 +63,34 @@ class PushbulletNotificationConfig(PushNotificationConfig):
             ),
         )
 
+    def send_listing(
+        self: "PushbulletNotificationConfig",
+        notice: ListingNotice,
+        logger: Logger | None = None,
+    ) -> bool:
+        """One listing as a Pushbullet *link* push, not a note.
+
+        A link push makes the whole notification tappable and opens the
+        listing; the app's own address goes in the body, since Pushbullet
+        carries exactly one URL per push.
+        """
+        body = notice.message
+        if notice.app_link:
+            body = f"{body}\n\nOpen in AIMM: {notice.app_link}" if body else notice.app_link
+        self._client().push_link(notice.title, notice.listing_url, body)
+        if logger:
+            logger.info(
+                f"""{hilight("[Notify]", "succ")} Sent {self.name} a link push {hilight(notice.title)}"""
+            )
+        return True
+
+    def send_message(
+        self: "PushbulletNotificationConfig",
+        title: str,
+        message: str,
+        logger: Logger | None = None,
+    ) -> bool:
+        pb = self._client()
         pb.push_note(
             title, message + "\n\nSent by https://github.com/BoPeng/ai-marketplace-monitor"
         )

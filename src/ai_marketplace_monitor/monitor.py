@@ -30,7 +30,7 @@ from .marketplace import (
     TItemConfig,
     TMarketplaceConfig,
 )
-from .notification import NotificationStatus
+from .notification import NotificationStatus, NotifyContext
 from .user import User
 from .utils import (
     CounterItem,
@@ -742,9 +742,18 @@ class MarketplaceMonitor:
             counter.increment(
                 CounterItem.NEW_VALIDATED_LISTING, item_config.name, len(new_listings)
             )
+            # What a per-listing notification needs and cannot work out for
+            # itself: the threshold the score is being judged against, and the
+            # origin its distance is measured from.
+            notify_context = NotifyContext(
+                notify_threshold=self._threshold_for(
+                    "rating", item_config, marketplace_config, DEFAULT_RATING
+                ),
+                home_location=marketplace_config.home_location,
+            )
             for user in users_to_notify:
                 User(self.config.user[user], logger=self.logger).notify(
-                    new_listings, listing_ratings, item_config
+                    new_listings, listing_ratings, item_config, context=notify_context
                 )
         # Re-save the session after every search, not only at login. Facebook
         # rotates cookies as you browse, so a state file written once at login

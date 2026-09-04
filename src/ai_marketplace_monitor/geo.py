@@ -1,4 +1,10 @@
-"""Distance between a listing's location and home, for the activity view.
+"""Distance between a listing's location and home.
+
+Used by the activity view (every row carries a `distance_mi`) and by the
+per-listing notifications, which say how far away a find is before you decide
+whether to open it. It lives beside the monitor rather than inside `webui`
+because importing `webui` pulls in the whole FastAPI application, and a
+notification should not have to start a web server to measure a distance.
 
 Marketplace gives a listing's location as free text -- "Asheboro, NC",
 "Texas City, TX", sometimes "Ships to you" or a bare city with no state. To

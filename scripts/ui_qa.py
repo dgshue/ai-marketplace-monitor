@@ -1940,6 +1940,15 @@ with sync_playwright() as p:
     pg.wait_for_timeout(600)
     pg.click("#sources-page [data-add=user]")
     pg.wait_for_timeout(500)
+    check(
+        "user form offers app_url, with the help text that explains it",
+        visible(pg, "#field-app_url")
+        and "Public address of this web UI" in (pg.text_content("#section-form") or ""),
+    )
+    check(
+        "user form offers the ntfy access token",
+        js(pg, "!!document.querySelector('#field-ntfy_token')"),
+    )
     pg.click("#add-section-name")
     pg.fill("#add-section-name", "qauser")
     pg.click("#field-ntfy_topic")
@@ -2656,6 +2665,136 @@ with sync_playwright() as p:
                 f"no horizontal overflow at {vw}: {view}", overflow(pg) <= 1, f"{overflow(pg)}px"
             )
         ctx.close()
+
+    # =====================================================================
+    # Deep link: #listing/<marketplace>/<id>
+    #
+    # The address every notification now carries. It has to survive a cold
+    # load (the login screen must not eat the hash), it has to find the
+    # listing whatever tier it now lives in -- the low probe is in none of the
+    # default views -- and an id that is not there must say so rather than
+    # silently showing a different listing.
+    # =====================================================================
+    _dl_queue = GALLERY_KEY  # scored 5, sits at the top of the queue
+    _dl_low = f"facebook:{LOW_ID}" if (_probe_item and _PROBE_REVIEW > 1) else None
+    if _dl_queue:
+        ctx = b.new_context(viewport={"width": 1440, "height": 900})
+        pg = ctx.new_page()
+        pg.on(
+            "console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", "")))
+        )
+        pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
+
+        # Cold: no session yet, so this goes through the login screen and the
+        # hash has to still be there on the other side.
+        pg.goto(BASE + "/#listing/" + _dl_queue.replace(":", "/"), wait_until="load")
+        pg.wait_for_timeout(900)
+        check("deep link: login screen keeps the hash", "#listing/" in pg.url, pg.url)
+        pg.fill("input[name=username]", "t@e.com")
+        pg.fill("input[name=password]", "pw")
+        pg.click("#login-submit")
+        pg.wait_for_timeout(4500)
+        check(
+            "deep link: opens the listing's detail after logging in",
+            js(pg, "window.AIMM.state.view") == "review"
+            and visible(pg, "#detail-pane")
+            and js(pg, "window.AIMM.review.cursor") == _dl_queue,
+            js(pg, "window.AIMM.review.cursor"),
+        )
+        check(
+            "deep link: the detail is the listing the link named",
+            GALLERY_ID in (js(pg, "window.AIMM.review.cursor") or "")
+            and (pg.text_content("#detail-pane h2") or "").startswith("QA tier probe"),
+            (pg.text_content("#detail-pane h2") or "")[:50],
+        )
+        check(
+            "deep link: the hash is consumed once it has been followed",
+            js(pg, "location.hash") == "#review",
+            js(pg, "location.hash"),
+        )
+        pg.screenshot(path="/tmp/qa/deeplink-desktop.png", full_page=True)
+
+        # A row no default view lists: below the review threshold, so it is
+        # out of Queue, out of Reviewed, and hidden behind the All view's Low
+        # chip. The router has to go and find it.
+        if _dl_low:
+            pg.goto(BASE + "/#listing/" + _dl_low.replace(":", "/"), wait_until="load")
+            pg.wait_for_timeout(4000)
+            check(
+                "deep link: reaches a low-tier row no default view lists",
+                js(pg, "window.AIMM.review.cursor") == _dl_low
+                and visible(pg, "#detail-pane")
+                and js(pg, "window.AIMM.review.mode") == "all"
+                and js(pg, "window.AIMM.review.verdict") == "low",
+                [js(pg, "window.AIMM.review.mode"), js(pg, "window.AIMM.review.verdict")],
+            )
+            pg.screenshot(path="/tmp/qa/deeplink-low-desktop.png")
+
+        # An id that is not in the cache: say so, do not show something else.
+        _before = js(pg, "window.AIMM.review.cursor")
+        js(pg, "() => { location.hash = '#listing/facebook/qa-no-such-listing'; }")
+        # The toast hides itself after 2.5s and the miss costs two /api/activity
+        # round trips, so wait for it to appear rather than for a fixed delay.
+        try:
+            pg.wait_for_selector("#toast:not(.hidden)", timeout=10000)
+        except Exception as err:
+            log.error("toast never appeared: %s", err)
+        check(
+            "deep link: an unknown id toasts instead of opening the wrong listing",
+            visible(pg, "#toast")
+            and "not found" in (pg.text_content("#toast-text") or "").lower(),
+            (pg.text_content("#toast-text") or "")[:40],
+        )
+        check(
+            "deep link: a bad id leaves the current listing alone",
+            js(pg, "window.AIMM.review.cursor") == _before,
+        )
+        check(
+            "deep link: the route parser reads marketplace and id",
+            js(pg, "JSON.stringify(window.__aimm.parseListingRoute('#listing/ebay/1234'))")
+            == '{"marketplace":"ebay","id":"1234"}',
+        )
+        check(
+            "deep link: a plain view hash is not a listing route",
+            js(pg, "window.__aimm.parseListingRoute('#status')") is None,
+        )
+        check("no horizontal overflow at 1440: deep link", overflow(pg) <= 1, f"{overflow(pg)}px")
+        ctx.close()
+
+        # Same link, phone shape: the detail arrives as the full-screen sheet.
+        ctx = b.new_context(
+            viewport={"width": 390, "height": 844},
+            device_scale_factor=2,
+            is_mobile=True,
+            has_touch=True,
+        )
+        pg = ctx.new_page()
+        pg.on(
+            "console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", "")))
+        )
+        pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
+        pg.goto(BASE + "/#listing/" + _dl_queue.replace(":", "/"), wait_until="load")
+        pg.wait_for_timeout(900)
+        pg.fill("input[name=username]", "t@e.com")
+        pg.fill("input[name=password]", "pw")
+        pg.click("#login-submit")
+        pg.wait_for_timeout(4500)
+        check(
+            "deep link at 390: opens the detail sheet",
+            visible(pg, "#detail-pane")
+            and js(pg, "document.querySelector('#app').classList.contains('detail-open')")
+            and js(pg, "window.AIMM.review.cursor") == _dl_queue,
+            js(pg, "window.AIMM.review.cursor"),
+        )
+        check(
+            "deep link at 390: the queue stack is out of the way",
+            not visible(pg, "#stack .tcard.top"),
+        )
+        check("no horizontal overflow at 390: deep link", overflow(pg) <= 1, f"{overflow(pg)}px")
+        pg.screenshot(path="/tmp/qa/deeplink-390.png")
+        ctx.close()
+    else:
+        check("deep-link checks (no probe rows to link to)", True, "skipped")
 
     # =====================================================================
     # Phone pass (390x844): tabs, swipe, detail, lists, settings screens

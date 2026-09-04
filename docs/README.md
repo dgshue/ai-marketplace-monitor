@@ -182,11 +182,33 @@ pushbullet_token = "yyyyyyyyyyyyyyyy"
 | `rate_limit_enabled`    | Optional    | Boolean         | Enable rate limiting for this notification method. Defaults to `false` (except Telegram which defaults to `true`).              |
 | `instance_rate_limit`   | Optional    | Integer         | Minimum seconds between messages for this specific configuration instance. Defaults to `1`.                                      |
 | `global_rate_limit`     | Optional    | Integer         | Maximum messages per second across all notification instances (sliding window). Defaults to `10` (`30` for Telegram).            |
+| `app_url`               | Optional    | String          | Public address of this web UI, e.g. `https://aimm.example.com`. Adds an "Open in AIMM" link to every notification.               |
+
+##### One notification per listing
+
+Push notifications (ntfy, Pushover, Pushbullet, Telegram) send **one message
+per listing**, not one digest per search. Each message carries:
+
+- a title of `price · title`, e.g. `$4,500 · 2014 Acura RLX SH-AWD`, prefixed
+  with `Price drop`, `Updated`, `Still listed` or `Resend` when it is not the
+  first notification for that listing;
+- the verdict and the threshold it was judged against (`5/5 Great deal · notify ≥ 4`);
+- straight-line distance from the marketplace's `home_location`, the listing's
+  location, and how long ago it was listed, when each is known;
+- the AI's one-line comment;
+- a link to the listing, and — when `app_url` is set — a second link straight to
+  that listing's detail in this web UI (`<app_url>/#listing/<marketplace>/<id>`).
+
+Email is unchanged: it still sends one digest per search, because a separate
+email per listing is the failure mode there rather than the fix.
+
+`app_url` is normally set once in the `[user.*]` section, since the link is
+per-user; it is accepted in any `[notification.*]` section as well.
 
 Note that
 
 1. These settings are shared across all notification methods. For example, if you are notifying with `notify_with=['gmail', 'pushbullet']`, the same `max_retries` and `retry_delay` will apply to both methods.
-2. Support for `with_description` vary across notification methods due to their own limitations and strength. For example, email notification will always include description.
+2. Support for `with_description` vary across notification methods due to their own limitations and strength. For example, email notification will always include description. For push notifications it is now **off** unless set: a per-listing message already carries the AI's one-line verdict, and a full marketplace description under it turns a glanceable card into a wall of text.
 3. Rate limiting prevents API violations by controlling message frequency. When enabled, the system waits for the longer of `instance_rate_limit` or `global_rate_limit` before sending each message. Telegram automatically enables rate limiting with optimized defaults for individual (1.1s) and group chats (3.0s).
 
 #### Telegram notification
@@ -221,15 +243,18 @@ Please refer to [PushBullet documentation](https://github.com/richard-better/pus
 | `pushover_user_key`  | Optional    | String   | Pushover user key.  |
 | `pushover_api_token` | Optional    | String   | Pushover API Token. |
 
-#### Pushover notification
+#### ntfy notification
 
 | Option           | Requirement | DataType | Description                                       |
 | ---------------- | ----------- | -------- | ------------------------------------------------- |
 | `ntfy_server`    | Optional    | String   | ntfy server, default to `https://ntfy.sh`         |
 | `ntfy_topic`     | Optional    | String   | A unique topic to receive your notification.      |
+| `ntfy_token`     | Optional    | String   | Access token for a server that refuses anonymous publishing. |
 | `message_format` | Optional    | String   | Format notification as `plain_text` or `markdown` |
 
 - According to [ntfy documentation](https://docs.ntfy.sh/publish/#markdown-formatting), markdown format is supported only by web app. Therefore, `message_format` is by default set to `plain_text`.
+- Listings are published through ntfy's [JSON publish API](https://docs.ntfy.sh/publish/#publish-as-json), so a notification carries the listing photo as its `attach`/`icon`, two `view` action buttons (**Open listing** and, with `app_url` set, **Open in AIMM**), a `click` target, `tags` for the item and marketplace, and priority `4` for a 5/5 listing (`3` otherwise).
+- `ntfy_token` is sent as `Authorization: Bearer <token>`, ntfy's [documented scheme](https://docs.ntfy.sh/publish/#access-tokens). For backwards compatibility a token smuggled onto the topic as a query string (`ntfy_topic = "mytopic?auth=..."`, the only option before this client could send headers) still works — the query is moved to the request URL — but `ntfy_token` is the supported form.
 
 ### Email notification
 

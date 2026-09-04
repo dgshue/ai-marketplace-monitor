@@ -1,3 +1,4 @@
+import html
 import http.client
 import json
 import urllib
@@ -5,7 +6,7 @@ from dataclasses import dataclass
 from logging import Logger
 from typing import ClassVar, List
 
-from .notification import PushNotificationConfig
+from .notification import ListingNotice, PushNotificationConfig
 from .utils import hilight
 
 
@@ -34,6 +35,63 @@ class PushoverNotificationConfig(PushNotificationConfig):
 
     def handle_message_format(self: "PushoverNotificationConfig") -> None:
         self.message_format = "html"
+
+    # Pushover truncates a message at 1024 characters and a title at 250.
+    MESSAGE_LIMIT: ClassVar[int] = 1024
+    TITLE_LIMIT: ClassVar[int] = 250
+
+    def _post(
+        self: "PushoverNotificationConfig",
+        params: dict,
+        logger: Logger | None = None,
+    ) -> bool:
+        conn = http.client.HTTPSConnection("api.pushover.net:443")
+        conn.request(
+            "POST",
+            "/1/messages.json",
+            urllib.parse.urlencode(
+                {"token": self.pushover_api_token, "user": self.pushover_user_key, **params}
+            ),
+            {"Content-type": "application/x-www-form-urlencoded"},
+        )
+        output = conn.getresponse().read().decode("utf-8")
+        data = json.loads(output)
+        if data["status"] != 1:
+            raise RuntimeError(output)
+        if logger:
+            logger.info(
+                f"""{hilight("[Notify]", "succ")} Sent {self.name} a message with title {hilight(str(params.get("title", "")))}"""
+            )
+        return True
+
+    def send_listing(
+        self: "PushoverNotificationConfig",
+        notice: ListingNotice,
+        logger: Logger | None = None,
+    ) -> bool:
+        """One listing, one push, with the listing as the notification's URL.
+
+        Pushover gives a message exactly one first-class link (``url`` plus
+        ``url_title``), so the marketplace listing takes it -- that is the
+        thing you cannot get to any other way -- and the app link rides in the
+        body as an anchor, which the Pushover clients render in HTML mode.
+        """
+        body = html.escape(notice.message).replace("\n", "<br>")
+        if notice.app_link:
+            body += f'<br><br><a href="{notice.app_link}">Open in AIMM</a>'
+        return self._post(
+            {
+                "title": notice.title[: self.TITLE_LIMIT],
+                "message": body[: self.MESSAGE_LIMIT],
+                "html": 1,
+                "url": notice.listing_url,
+                "url_title": "Open listing",
+                # Pushover's scale is -2..2, not ntfy's 1..5: 1 is "high",
+                # which bypasses the user's quiet hours. Only a 5/5 gets it.
+                "priority": 1 if notice.priority >= 4 else 0,
+            },
+            logger=logger,
+        )
 
     def send_message(
         self: "PushoverNotificationConfig",

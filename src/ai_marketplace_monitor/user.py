@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from logging import Logger
 from typing import Any, List, Tuple, Type
@@ -10,7 +10,7 @@ from .ai import AIResponse  # type: ignore
 from .email_notify import EmailNotificationConfig
 from .listing import Listing
 from .marketplace import TItemConfig
-from .notification import NotificationConfig, NotificationStatus
+from .notification import NotificationConfig, NotificationStatus, NotifyContext
 from .ntfy import NtfyNotificationConfig
 from .pushbullet import PushbulletNotificationConfig
 from .pushover import PushoverNotificationConfig
@@ -182,6 +182,7 @@ class User:
         item_config: TItemConfig,
         local_cache: Cache | None = None,
         force: bool = False,
+        context: NotifyContext | None = None,
     ) -> None:
         if self.config.enabled is False:
             if self.logger:
@@ -191,10 +192,29 @@ class User:
             return
         statuses = [self.notification_status(listing, local_cache) for listing in listings]
 
+        # A fresh context per user: `sent` is filled in by the backends and the
+        # caller passes the same NotifyContext to every user in the loop.
+        ctx = replace(context, sent=set()) if context is not None else NotifyContext()
+
         if NotificationConfig.notify_all(
-            self.config, listings, ratings, statuses, force=force, logger=self.logger
+            self.config,
+            listings,
+            ratings,
+            statuses,
+            force=force,
+            logger=self.logger,
+            context=ctx,
         ):
             counter.increment(CounterItem.NOTIFICATIONS_SENT, item_config.name)
             for listing, ns in zip(listings, statuses):
-                if force or ns != NotificationStatus.NOTIFIED:
-                    self.to_cache(listing, local_cache=local_cache)
+                if not (force or ns != NotificationStatus.NOTIFIED):
+                    continue
+                # Record what was actually sent. A push backend reports each
+                # listing it got through; a digest backend (email) reports
+                # nothing, and an empty set means "no opinion" -- then the old
+                # all-or-nothing rule applies, so email-only users are
+                # unaffected. Anything left out stays un-notified and the next
+                # search tries it again.
+                if ctx.sent and (listing.marketplace, listing.id) not in ctx.sent:
+                    continue
+                self.to_cache(listing, local_cache=local_cache)

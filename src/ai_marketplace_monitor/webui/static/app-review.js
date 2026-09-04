@@ -1033,6 +1033,49 @@
     });
   };
 
+  // ---------------------------------------------------------------
+  // Deep link target: open one listing's detail, whatever tier it is in.
+  //
+  // A notification links to a listing that may since have been kept, hidden,
+  // dismissed or rated below the review threshold — and each of those lives
+  // in a different list. Rather than fail, pick the mode (and the chip) that
+  // contains it and clear the filters that would hide it, so the link always
+  // lands on the detail the notification was about.
+  // ---------------------------------------------------------------
+  const openListingRoute = async (marketplace, id) => {
+    const key = `${marketplace}:${id}`;
+    if (!R.listings.length) await load();
+    let row = byKey(key);
+    if (!row) {
+      // Rated seconds ago and not in this page's snapshot yet: one reload,
+      // then it either exists or it genuinely does not.
+      await load();
+      row = byKey(key);
+    }
+    if (!row) return false;
+    R.text = "";
+    const filterInput = $("#activity-filter");
+    if (filterInput) filterInput.value = "";
+    R.rchip = "";
+    R.verdict = "";
+    R.item = "";
+    R.showAll = true;
+    const inMode = (mode) => rowsForMode(mode).some((r) => rowKey(r) === key);
+    R.mode = inMode("queue") ? "queue" : inMode("reviewed") ? "reviewed" : "all";
+    if (R.mode === "all") {
+      // The All view hides both of these behind their own chip.
+      if (row.hidden) R.verdict = "hidden";
+      else if (isLow(row)) R.verdict = "low";
+    }
+    // Last resort: the row belongs to a paused or deleted item, which every
+    // default view filters out. Its own pill brings it back.
+    if (!inMode(R.mode)) R.item = row.item;
+    R.cursor = key;
+    R.detail = true;
+    render();
+    return true;
+  };
+
   const render = () => {
     setSeg();
     renderHead();
@@ -1444,7 +1487,11 @@
     if (state.view === "review") renderHead();
   });
 
-  window.AIMM.views.review = { show: () => (R.listings.length ? render() : load()) };
+  window.AIMM.views.review = {
+    show: () => (R.listings.length ? render() : load()),
+    // Called by the router for #listing/<marketplace>/<id>.
+    open: openListingRoute,
+  };
   window.AIMM.boot(load);
 
   // Pure derivations for the QA harness: the queue split must be assertable
@@ -1461,6 +1508,7 @@
     photoUrl,
     share: shareListing,
     shareText,
+    openListingRoute,
     fmtAgo,
     fmtWhen,
     gallery: { index: galIndex, move: movePhoto, to: scrollGalTo, open: openLightbox, close: closeLightbox, isOpen: lightboxOpen },

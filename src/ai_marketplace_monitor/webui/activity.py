@@ -32,9 +32,9 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from diskcache import Cache  # type: ignore
 
+from ..geo import Coordinates, distance_from, resolve
 from ..listing import Listing, canonical_url
 from ..utils import CacheType
-from .geo import Coordinates, distance_from, resolve
 
 if sys.version_info >= (3, 11):
     import tomllib

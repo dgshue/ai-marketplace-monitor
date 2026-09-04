@@ -16,7 +16,7 @@ from markupsafe import Markup, escape
 
 from .ai import AIResponse  # type: ignore
 from .listing import Listing
-from .notification import NotificationConfig, NotificationStatus
+from .notification import NotificationConfig, NotificationStatus, NotifyContext
 from .utils import fetch_with_retry, hilight, resize_image_data
 
 
@@ -232,7 +232,15 @@ class EmailNotificationConfig(NotificationConfig):
         notification_status: List[NotificationStatus],
         force: bool = False,
         logger: Logger | None = None,
+        context: NotifyContext | None = None,
     ) -> bool:
+        """One digest per search, still.
+
+        The push backends fan out one message per listing; six separate emails
+        would be the failure mode here, not the fix, so this path is unchanged.
+        ``context`` is accepted and ignored: notify_all hands the same
+        arguments to every backend.
+        """
         if not self._has_required_fields():
             if logger:
                 logger.debug(

@@ -184,7 +184,41 @@
       showView(el.dataset.view);
     })
   );
+  // ---------------------------------------------------------------
+  // Deep link: #listing/<marketplace>/<id>
+  //
+  // The address a notification puts in front of you. It is a hash route and
+  // not a path so it needs no reverse-proxy rewrite, and so an expired
+  // session lands on the login screen with the target still in the URL —
+  // showLogin never touches the hash, and bootstrap re-reads it after the
+  // session exists (including proxy-auth mode, which has no login form).
+  // ---------------------------------------------------------------
+  const LISTING_ROUTE = /^#?listing\/([^/]+)\/([^/?#]+)$/;
+  const parseListingRoute = (hash) => {
+    const m = LISTING_ROUTE.exec(String(hash || "").trim());
+    return m ? { marketplace: decodeURIComponent(m[1]), id: decodeURIComponent(m[2]) } : null;
+  };
+  const openListingRoute = async (target) => {
+    if (!target) return false;
+    // Switch first: the Review screen owns the listing, and showView rewrites
+    // the hash to #review, so the link is consumed and a refresh does not
+    // re-open a listing the user has since navigated away from.
+    showView("review");
+    const view = views.review;
+    if (view && view.open) {
+      const ok = await view.open(target.marketplace, target.id);
+      if (!ok) toast("Listing not found", { error: true });
+      return ok;
+    }
+    toast("Listing not found", { error: true });
+    return false;
+  };
   window.addEventListener("hashchange", () => {
+    const target = parseListingRoute(location.hash);
+    if (target) {
+      openListingRoute(target);
+      return;
+    }
     const name = (location.hash || "#review").slice(1);
     if (name !== state.view && views[name]) showView(name);
   });
@@ -570,6 +604,13 @@
     loadMonitorState();
     loadEnvStatus();
     if (!state._monitorPoll) state._monitorPoll = setInterval(loadMonitorState, 10000);
+    const target = parseListingRoute(location.hash);
+    if (target) {
+      // The review boot step above already loaded the rows, so the listing is
+      // there to be found by the time we look for it.
+      await openListingRoute(target);
+      return;
+    }
     const initial = (location.hash || "#review").slice(1);
     showView(views[initial] ? initial : "review");
   };
@@ -579,11 +620,12 @@
     fmtDur, fmtClock, parseDuration, fmtCadence, activeBlocks, blockChipLabel, nextJob,
     loadMonitorState, loadEnvStatus, renderMonitorStatus, togglePause, searchNow, clearBlock,
     exportCsv, logout, boot: (fn) => boots.push(fn), openKeys,
+    parseListingRoute, openListingRoute,
   };
   // Pure helpers the QA harness asserts directly (a real block is not
   // something to provoke for a test).
   window.__aimm = Object.assign(window.__aimm || {}, {
-    parseDuration, fmtCadence, activeBlocks, blockChipLabel,
+    parseDuration, fmtCadence, activeBlocks, blockChipLabel, parseListingRoute, openListingRoute,
   });
 
   // If we already have a session cookie from a prior visit, try bootstrapping.

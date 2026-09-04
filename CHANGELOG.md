@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `with_description` is now **off by default** for push notifications. A per-listing message already
+  carries the AI's one-line verdict; the full marketplace description under it turned a glanceable card
+  into a wall of text. Set it to a character count, or to `true`, to get it back. Email is unaffected.
+- Notification bookkeeping now follows the sends rather than the batch: a listing no backend managed
+  to deliver stays un-notified and is retried on the next search, instead of being marked notified
+  because a different listing in the same search succeeded. If a backend exhausts its retries on one
+  listing it stops trying the rest of that batch — on the defaults each failure costs five minutes of
+  sleeping, and repeating that per listing stalled the search loop.
+- `geo.py` moved from `webui/` to the package root: distances are no longer only the activity view's
+  business, and a notification should not have to import the whole FastAPI app to measure one.
 - Web UI rebuilt mobile-first around a review queue: one listing at a time, swipe right to keep / left to
   dismiss, tap for details, Queue / Reviewed / All views, keyboard triage on desktop (`J`/`K`, `→`/`←`,
   `1`–`5`, `Enter`, `O`, `C`, `Z`, `H`, `R`, `?`), grouped-list Items / Sources / Status screens, and a web
@@ -15,6 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forms, sources set-up, status, logs, CSV export, noVNC link) is carried over.
 
 ### Added
+- **One notification per listing**, with a link to the listing *and* a link into this app. Push backends
+  (ntfy, Pushover, Pushbullet, Telegram) no longer batch a search's finds into a single digest: each
+  listing is its own notification, titled `$4,500 · 2014 Acura RLX SH-AWD`, with `5/5 Great deal ·
+  notify ≥ 4`, straight-line distance from the marketplace's `home_location`, the location, `listed 3d
+  ago`, and the AI's one-line comment. Email still digests — a separate email per listing is the failure
+  mode there, not the fix. The wording is built once, in `build_listing_notice`, so every backend says
+  the same thing and only the transport differs.
+- `app_url` (new, optional, on `[user.*]` or any `[notification.*]` section): the public address of this
+  web UI. With it set, every notification carries a second link — `<app_url>/#listing/<marketplace>/<id>`
+  — and the web UI's router opens that listing's detail directly, in whichever tier it now lives (queue,
+  reviewed, hidden, low, or under a paused item), clearing the filters that would otherwise hide it. An
+  unknown id shows a "Listing not found" toast. The hash survives the login redirect, including
+  proxy-auth deployments that have no login form.
+- ntfy notifications are now published through the [JSON publish API](https://docs.ntfy.sh/publish/#publish-as-json)
+  rather than as a raw POST body, which is what makes the rest possible: two `view` action buttons
+  (**Open listing**, **Open in AIMM**), a `click` target, the listing's first photo as `attach` and
+  `icon`, `tags` for the item and marketplace, and priority `4` for a 5/5 (`3` otherwise). Block alerts
+  keep their single-message shape and gain a click through to the Status page.
+- `ntfy_token` (new, optional): sent as `Authorization: Bearer <token>`, ntfy's documented scheme. A
+  token smuggled onto the topic as `?auth=…` — the only option before this client could send headers —
+  is still honoured: the query string is moved from the topic to the request URL, so an existing
+  deployment keeps publishing until it migrates.
+
 - Every listing now carries two clocks: **found** (when the monitor first cached its details) and
   **listed** (when the seller posted it). Facebook's listing page supplies the second one from the
   page's own inline `creation_time`, falling back to parsing the rendered "Listed 3 days ago in
