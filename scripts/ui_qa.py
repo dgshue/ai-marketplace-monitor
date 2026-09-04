@@ -127,6 +127,12 @@ try:
         bool(_hit) and _hit[0]["item"] == "car" and _hit[0]["score"] == 4,
     )
     check(
+        "activity rows carry found, listed and the raw url",
+        bool(_hit)
+        and {"first_seen", "listed_at", "listed_text", "raw_url", "url"} <= set(_hit[0]),
+        sorted(set(_hit[0])) if _hit else "MISSING",
+    )
+    check(
         "activity rows carry kept + reviewed_at",
         bool(_hit) and _hit[0]["kept"] is False and "reviewed_at" in _hit[0],
         (
@@ -138,6 +144,67 @@ try:
 finally:
     _cache.delete((_CT.LISTING_DETAILS.value, _probe_url))
     _cache.delete((_CT.AI_BY_LISTING.value, "facebook", "qa-drift-probe", "car"))
+
+# ---------- pre-browser unit: relative listing times ----------
+# Facebook words a listing's age relatively ("Listed 3 days ago in High Point,
+# NC"), which rots in a cache, so it is resolved to an epoch at scrape time.
+from ai_marketplace_monitor.listing import canonical_url as _canon
+from ai_marketplace_monitor.utils import parse_relative_time as _prt
+
+_rel_now = time.time()
+_rel_cases = [
+    ("Listed 3 days ago in High Point, NC", 3 * 86400),
+    ("Listed 2 hours ago", 7200),
+    ("Listed a week ago", 604800),
+    ("Listed an hour ago", 3600),
+    ("Listed over 2 weeks ago", 1209600),
+    ("Listed just now", 0),
+    ("Listed 45 minutes ago", 2700),
+    # The visually hidden twin Facebook renders next to the real one.
+    ("Listed a week agoa week ago in High Point, NC", 604800),
+]
+_rel_got = [(t, _prt(t, now=_rel_now)) for t, _ in _rel_cases]
+check(
+    "relative listing times resolve to an epoch",
+    all(
+        got is not None and abs((_rel_now - got) - want) < 2
+        for (_, want), (_, got) in zip(_rel_cases, _rel_got)
+    ),
+    [(t, None if g is None else round(_rel_now - g)) for t, g in _rel_got],
+)
+_rel_unknown = ["Listed  in High Point, NC", "March, PA", "2 bedrooms 1 bathroom", "in 3 days", ""]
+check(
+    "text with no listing time stays unknown",
+    all(_prt(t, now=_rel_now) is None for t in _rel_unknown),
+    [t for t in _rel_unknown if _prt(t, now=_rel_now) is not None],
+)
+
+# ---------- pre-browser unit: canonical, shareable URLs ----------
+_url_cases = [
+    (
+        (
+            "facebook",
+            "https://www.facebook.com/marketplace/item/123/?ref=search&__tn__=!%3AD",
+            "123",
+        ),
+        "https://www.facebook.com/marketplace/item/123/",
+    ),
+    (
+        ("facebook", "https://www.facebook.com/marketplace/item/123", "123"),
+        "https://www.facebook.com/marketplace/item/123/",
+    ),
+    (("ebay", "https://www.ebay.com/itm/9?_trkparms=x", "9"), "https://www.ebay.com/itm/9"),
+    (("ebay", "https://www.ebay.co.uk/itm/9?hash=x", "9"), "https://www.ebay.co.uk/itm/9"),
+    (
+        ("depop", "https://www.depop.com/products/slug?utm_source=share", "slug"),
+        "https://www.depop.com/products/slug",
+    ),
+]
+check(
+    "canonical urls drop the tracking junk",
+    all(_canon(*args) == want for args, want in _url_cases),
+    [(args[1], _canon(*args)) for args, want in _url_cases if _canon(*args) != want],
+)
 
 # ---------- pre-browser unit: the three score tiers ----------
 # Own scratch cache and own config: the verdict boundaries have to be proved
@@ -376,7 +443,10 @@ PROBE_COMMENT = (
 )
 
 
-def _seed_probe(listing_id, score, images=None, comment="tier probe"):
+def _seed_probe(
+    listing_id, score, images=None, comment="tier probe", listed_at=None, found_ago=900
+):
+    """One probe row. `listed_at=None` is the unknown case the UI shows as "—"."""
     url = f"https://qa.invalid/item/{listing_id}"
     images = images or []
     _cache.set(
@@ -394,6 +464,9 @@ def _seed_probe(listing_id, score, images=None, comment="tier probe"):
             "seller": "",
             "condition": "",
             "description": "tier probe",
+            "listed_at": listed_at,
+            "listed_text": "3 days ago" if listed_at else "",
+            "first_seen": time.time() - found_ago,
         },
         tag=_CT.LISTING_DETAILS.value,
     )
@@ -406,9 +479,15 @@ def _seed_probe(listing_id, score, images=None, comment="tier probe"):
     _probe_keys.append((_CT.AI_BY_LISTING.value, "facebook", listing_id, _probe_item))
 
 
+# The gallery probe carries both clocks (so the detail tiles and the "caught
+# in" line have something to show); OK_ID carries a listing time too so the
+# "recently listed" sort has more than one known value; LOW_ID deliberately
+# carries none, which is the "—" case.
+GALLERY_LISTED_AT = time.time() - 3 * 86400
+GALLERY_FOUND_AGO = 2 * 3600
 if _probe_item and _PROBE_REVIEW > 1:
     _seed_probe(LOW_ID, _PROBE_REVIEW - 1)
-    _seed_probe(OK_ID, _PROBE_REVIEW)
+    _seed_probe(OK_ID, _PROBE_REVIEW, listed_at=time.time() - 5 * 3600, found_ago=3600)
 GALLERY_KEY = f"facebook:{GALLERY_ID}" if _probe_item else None
 if _probe_item:
     # Score 5 so it sorts to the top of the queue and the carousel is what a
@@ -421,6 +500,8 @@ if _probe_item:
             for n in range(GALLERY_N)
         ],
         comment=PROBE_COMMENT,
+        listed_at=GALLERY_LISTED_AT,
+        found_ago=GALLERY_FOUND_AGO,
     )
     _seed_snapshots(GALLERY_URL, GALLERY_N)
 
@@ -522,6 +603,11 @@ with sync_playwright() as p:
     # Desktop pass (1440x900): login, review flow, keyboard, config, status
     # =====================================================================
     ctx = b.new_context(viewport={"width": 1440, "height": 900})
+    # The probe rows are marketplace="facebook", so their canonical URL is a
+    # real facebook.com address. The "O opens a new tab" check only cares that
+    # a tab opened, so the request is cut before it leaves the box -- QA does
+    # not touch Facebook.
+    ctx.route("**://*.facebook.com/**", lambda route: route.abort())
     pg = ctx.new_page()
     pg.on("console", lambda m: msgs.append((m.type, m.text, (m.location or {}).get("url", ""))))
     pg.on("pageerror", lambda e: msgs.append(("PAGEERROR", str(e), "")))
@@ -603,6 +689,18 @@ with sync_playwright() as p:
         "KEEP / NOPE stamps on the card",
         js(pg, "document.querySelectorAll('#stack .tcard.top .stamp').length") == 2,
     )
+    _card_meta = pg.text_content("#stack .tcard.top .meta") or ""
+    check(
+        "queue card meta carries found (and listed when known)",
+        re.search(r"found \S+ ago", _card_meta) is not None,
+        _card_meta[:90],
+    )
+    if _probe_item:
+        check(
+            "queue card meta carries the listing time",
+            re.search(r"listed \S+ ago", _card_meta) is not None,
+            _card_meta[:90],
+        )
     check(
         "desktop: rail lists the queue",
         js(pg, "document.querySelectorAll('#rail .lrow').length") >= min(q0, 5),
@@ -758,10 +856,32 @@ with sync_playwright() as p:
         ),
         (pg.text_content("#detail-pane .facts") or "")[-70:],
     )
+    _facts = pg.text_content("#detail-pane .facts") or ""
     check(
-        "detail action bar: Dismiss / Open / Keep",
+        "detail facts grid has FOUND and LISTED tiles",
+        js(
+            pg,
+            "Array.from(document.querySelectorAll('#detail-pane .facts > div > small')).map(e => e.textContent)",
+        )[:2]
+        == ["Found", "Listed"],
+        js(
+            pg,
+            "Array.from(document.querySelectorAll('#detail-pane .facts > div > small')).map(e => e.textContent)",
+        ),
+    )
+    check(
+        "the time tiles show an absolute stamp with the relative form under it",
+        js(
+            pg,
+            "(() => { const t = document.querySelectorAll('#detail-pane .facts div'); const a = t[0] && t[0].querySelector('span small'); return !!a && /ago$/.test(a.textContent.trim()); })()",
+        ),
+        _facts[:80],
+    )
+    check(
+        "detail action bar: Dismiss / Open / Share / Keep",
         visible(pg, "#dd-dismiss")
         and visible(pg, "#dd-keep")
+        and visible(pg, "#dd-share")
         and (
             visible(pg, "#dd-open")
             or not js(
@@ -787,10 +907,50 @@ with sync_playwright() as p:
     pg.click("#detail-pane .star[data-rank='5']")
     pg.wait_for_timeout(1000)
     check("same star clears the rating", (api_row(pg, k1) or {}).get("my_rank") is None)
+    _open_href = js(pg, "(document.querySelector('#dd-open') || {}).href || ''")
+    check(
+        "Open points at the canonical url (no tracking parameters)",
+        bool(_open_href) and "?" not in _open_href and "__tn__" not in _open_href,
+        _open_href,
+    )
     with ctx.expect_page() as newpage:
         pg.keyboard.press("o")
     check("O opens the listing in a new tab", newpage.value is not None)
     newpage.value.close()
+
+    # ---------- share: C copies the link and says so ----------
+    # navigator.share does not exist in headless Chromium, which is exactly the
+    # desktop path: fall through to the clipboard. The write is stubbed so the
+    # assertion is about what the app asked for, not about the OS clipboard.
+    js(
+        pg,
+        """() => {
+          window.__qaCopied = null;
+          if (!navigator.clipboard) Object.defineProperty(navigator, 'clipboard', { value: {}, configurable: true });
+          navigator.clipboard.writeText = (t) => { window.__qaCopied = t; return Promise.resolve(); };
+        }""",
+    )
+    pg.keyboard.press("c")
+    pg.wait_for_timeout(600)
+    _copied = js(pg, "window.__qaCopied")
+    check(
+        "C copies the listing link",
+        bool(_copied) and "?" not in _copied,
+        _copied,
+    )
+    check(
+        "copying shows the toast",
+        visible(pg, "#toast") and "copied" in (pg.text_content("#toast-text") or "").lower(),
+        pg.text_content("#toast-text"),
+    )
+    js(pg, "() => { window.__qaCopied = null; }")
+    pg.click("#dd-share")
+    pg.wait_for_timeout(600)
+    check("the Share button copies the same link", js(pg, "window.__qaCopied") == _copied)
+    check(
+        "sharing decides nothing",
+        (lambda r: bool(r) and not r["kept"] and not r["hidden"])(api_row(pg, k1)),
+    )
     pg.keyboard.press("Escape")
     pg.wait_for_timeout(400)
     check("Esc collapses details", not visible(pg, "#detail-pane") and visible(pg, "#queue-pane"))
@@ -1074,6 +1234,58 @@ with sync_playwright() as p:
     rows = sort_by("myrank")
     ranks = [r[3] for r in rows]
     check("sort: my rating first", ranks == sorted(ranks, reverse=True))
+    pg.select_option("#deal-sort", "listed")
+    pg.wait_for_timeout(400)
+    listed = js(pg, "window.__aimm.allRows().map(r => r.listed_at)")
+    known = [v for v in listed if v]
+    idx_null = [i for i, v in enumerate(listed) if not v]
+    idx_known = [i for i, v in enumerate(listed) if v]
+    check("sort: recently listed descending", known == sorted(known, reverse=True), known[:6])
+    check(
+        "sort: listings with no known listing time sort last",
+        (not idx_null) or (not idx_known) or min(idx_null) > max(idx_known),
+        (idx_known[:3], idx_null[:3]),
+    )
+    check(
+        "sort: the unknown ones render an em dash, never a fabricated date",
+        js(
+            pg,
+            """(() => {
+              const rows = window.__aimm.allRows().filter(r => !r.listed_at);
+              if (!rows.length) return 'none';
+              return rows.every(r => !window.__aimm.fmtAgo(r.listed_at));
+            })()""",
+        )
+        in (True, "none"),
+    )
+    check(
+        "sort: 'recently listed' persists",
+        js(pg, "localStorage.getItem('aimm.dealSort')") == "listed",
+    )
+    # A row whose listing time was never recorded must say so in the detail,
+    # not borrow the found time or invent a date.
+    _unknown_key = js(
+        pg,
+        "(() => { const r = window.__aimm.allRows().find(r => !r.listed_at); return r ? window.__aimm.rowKey(r) : null; })()",
+    )
+    if _unknown_key:
+        pg.click(f"#rail .lrow[data-key={json.dumps(_unknown_key)}]")
+        pg.wait_for_timeout(900)
+        _tiles = js(
+            pg,
+            "Array.from(document.querySelectorAll('#detail-pane .facts div')).slice(0, 2).map(e => e.querySelector('span').textContent.trim())",
+        )
+        check(
+            "unknown listing time renders as an em dash",
+            len(_tiles) == 2 and _tiles[1] == "—",
+            _tiles,
+        )
+        check(
+            "no caught-in line without both clocks",
+            not js(pg, "!!document.querySelector('#detail-pane .caught')"),
+        )
+    else:
+        check("unknown listing time renders as an em dash", True, "every row has a listing time")
     sort_by("score")
     check("sort persists", js(pg, "localStorage.getItem('aimm.dealSort')") == "score")
     check(
@@ -2544,6 +2756,24 @@ with sync_playwright() as p:
         targets_ok("#detail-pane .actbar .btn") and targets_ok("#detail-pane .rate5 button"),
     )
     check("no horizontal overflow at 390: detail", overflow(pg) <= 1, f"{overflow(pg)}px")
+    check("390: the detail sheet offers Share", visible(pg, "#dd-share"))
+    check(
+        "390: the four action buttons fit the sheet",
+        js(
+            pg,
+            "(() => { const bar = document.querySelector('#detail-pane .actbar'); return bar ? bar.scrollWidth <= bar.clientWidth + 1 : false; })()",
+        ),
+    )
+    _mfacts = js(
+        pg,
+        "Array.from(document.querySelectorAll('#detail-pane .facts > div > small')).map(e => e.textContent)",
+    )
+    check("390: FOUND and LISTED tiles render", _mfacts[:2] == ["Found", "Listed"], _mfacts)
+    check(
+        "390: the caught-in line reports the gap between the two clocks",
+        bool(re.search(r"Caught in \S+", pg.text_content("#detail-pane") or "")),
+        (pg.text_content("#detail-pane .caught") or "")[:60],
+    )
     check(
         "mobile: score badge clear of the price (photo present)",
         overlap(box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")) == 0,

@@ -36,6 +36,8 @@ from .utils import (
     extract_price,
     hilight,
     is_substring,
+    parse_relative_time,
+    relative_time_phrase,
 )
 
 
@@ -236,6 +238,18 @@ GALLERY_BAND_PX = 400
 # other English landmark this scraper keys on.
 PRODUCT_PHOTO_ALT = "Product photo of"
 
+# The word that introduces a listing's age on the item page: Facebook renders
+# "Listed 3 days ago in High Point, NC" (or just "Listed 2 hours ago") in a
+# span right under the title/price block. Translatable, like every other
+# English landmark this scraper keys on.
+LISTED_LABEL = "Listed"
+# A "Listed ..." span is one short line. Anything longer is an ancestor that
+# happens to contain the word, or a description quoting it.
+MAX_LISTED_TEXT = 160
+# Sanity window for an epoch claiming to be a listing's creation time:
+# Marketplace did not exist before 2016, and nothing is posted in the future.
+MIN_LISTED_EPOCH = 1451606400.0  # 2016-01-01
+
 
 def _photo_size_hint(url: str) -> int:
     """Largest dimension the CDN transform parameters ask for, 0 if unknown."""
@@ -361,6 +375,63 @@ _LISTING_PHOTOS_JS = r"""
     }
   }
   return [];
+}
+"""
+
+
+# The listing's own creation timestamp, from the page's inline JSON.
+#
+# Facebook ships every Marketplace listing's public data as JSON inside a
+# <script> tag on the item page -- the same fact `_LISTING_PHOTOS_JS` above
+# already relies on, and the approach every maintained Marketplace scraper
+# takes (see Scrapfly's "How to Scrape Facebook" write-up, which parses the
+# hidden JSON out of the script tags rather than the rendered DOM:
+# https://scrapfly.io/blog/posts/how-to-scrape-facebook). The field is
+# `creation_time`, an integer epoch -- the same clock Facebook's own
+# `sortBy=creation_time_descend` ranks by, which SORT_BY_PARAM already uses.
+#
+# It is exact, it needs no locale, and it does not drift the way the rendered
+# "Listed a week ago" does. Sanity-bounded because a bare "creation_time"
+# match could in principle land on some other object's field.
+_LISTING_CREATED_JS = r"""
+(bounds) => {
+  const re = /"creation_time"\s*:\s*(\d{9,12})/g;
+  for (const node of document.querySelectorAll('script')) {
+    const text = node.textContent || '';
+    if (text.indexOf('"creation_time"') === -1) continue;
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const value = parseInt(m[1], 10);
+      if (value >= bounds[0] && value <= bounds[1]) return value;
+    }
+  }
+  return 0;
+}
+"""
+
+# The rendered "Listed ... ago" line, as a fallback when the inline JSON has
+# moved or been renamed. Scoped to short spans so an ancestor that merely
+# contains the word cannot win, and the shortest match is taken because the
+# tightest span is the one that holds only the phrase.
+#
+# Facebook renders the relative time twice inside that span -- once in an
+# aria-hidden span and once in a visually-hidden div -- so the raw text reads
+# "Listed a week agoa week ago in High Point, NC". The parser searches rather
+# than splits, so the duplication is harmless.
+_LISTED_TEXT_JS = r"""
+(prefix) => {
+  const pick = (nodes) => {
+    let best = '';
+    for (const el of nodes) {
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 160) continue;
+      if (t.toLowerCase().indexOf(prefix) !== 0) continue;
+      if (!best || t.length < best.length) best = t;
+    }
+    return best;
+  };
+  return pick(document.querySelectorAll('span[dir="auto"]')) || pick(document.querySelectorAll('span'));
 }
 """
 
@@ -1383,6 +1454,52 @@ class FacebookItemPage(WebPage):
         """The primary photo: the first entry of the gallery, or nothing."""
         return (self.get_images() or [""])[0]
 
+    def _listed_from_json(self: "FacebookItemPage") -> float | None:
+        """The seller's posting time from the page's inline listing JSON."""
+        try:
+            raw = self.page.evaluate(_LISTING_CREATED_JS, [MIN_LISTED_EPOCH, time.time() + 86400])
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"{hilight('[Retrieve]', 'fail')} creation_time: {e}")
+            return None
+        try:
+            value = float(raw or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value >= MIN_LISTED_EPOCH else None
+
+    def _listed_from_dom(self: "FacebookItemPage") -> str:
+        """The rendered "Listed ... ago" line, raw, or an empty string."""
+        try:
+            text = self.page.evaluate(
+                _LISTED_TEXT_JS, self.translator(LISTED_LABEL).strip().lower()
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"{hilight('[Retrieve]', 'fail')} listed text: {e}")
+            return ""
+        return str(text or "")[:MAX_LISTED_TEXT]
+
+    def get_listed(self: "FacebookItemPage") -> Tuple[float | None, str]:
+        """(when the seller posted it, the phrase the page used for it).
+
+        The inline JSON wins: it is an exact epoch and needs no locale. The
+        rendered line is the fallback for the day Facebook renames that key,
+        and it is also the only source of the wording -- so it is read either
+        way when it is cheap to, and resolved against *now* because the page
+        in front of us was rendered just now.
+        """
+        spoken = self._listed_from_dom()
+        phrase = relative_time_phrase(spoken, self.translator)[1] if spoken else ""
+        stamp = self._listed_from_json()
+        if stamp is None and spoken:
+            stamp = parse_relative_time(spoken, translator=self.translator)
+        return stamp, phrase
+
     def get_seller(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_seller is not implemented for this page")
 
@@ -1434,6 +1551,7 @@ class FacebookItemPage(WebPage):
         if self.logger:
             self.logger.info(f"{hilight('[Retrieve]', 'succ')} Parsing {hilight(title)}")
         images = self.get_images()
+        listed_at, listed_text = self.get_listed()
         res = Listing(
             marketplace="facebook",
             name="",
@@ -1447,6 +1565,8 @@ class FacebookItemPage(WebPage):
             condition=self.get_condition(),
             description=description,
             seller=self.get_seller(),
+            listed_at=listed_at,
+            listed_text=listed_text,
         )
         if self.logger:
             self.logger.debug(f"{hilight('[Retrieve]', 'succ')} {pretty_repr(res)}")

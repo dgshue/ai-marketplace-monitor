@@ -122,7 +122,9 @@ def test_build_rows_full_join(temp_cache: Cache) -> None:
     assert row["seller"] == "Jane Doe"
     assert row["condition"] == "used_good"
     assert row["notified_user"] == "me"
-    assert row["url"] == "https://www.facebook.com/marketplace/item/123/?ref=search"
+    # The CSV is a link leaving the app, so it carries the canonical form --
+    # no `?ref=search` click trail riding along into someone else's inbox.
+    assert row["url"] == "https://www.facebook.com/marketplace/item/123/"
 
 
 def test_build_rows_missing_details_uses_fallback_url(temp_cache: Cache) -> None:
@@ -187,7 +189,7 @@ def test_build_rows_excludes_unnotified_listings(temp_cache: Cache) -> None:
 
     rows = build_found_rows(temp_cache)
     assert len(rows) == 1
-    assert rows[0]["url"] == "https://www.facebook.com/marketplace/item/111/?ref=search"
+    assert rows[0]["url"] == "https://www.facebook.com/marketplace/item/111/"
 
 
 from fastapi.testclient import TestClient  # noqa: E402

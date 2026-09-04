@@ -400,6 +400,13 @@ textarea.inp { min-height: 88px; padding: 10px 12px; line-height: 1.45; resize: 
 .facts div { background: var(--sur); border: 1px solid var(--bd); border-radius: 12px; padding: 10px 12px; min-width: 0; }
 .facts small { display: block; color: var(--mu); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .facts span { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+/* The relative half of the Found / Listed tiles: same line as the absolute
+   date, quieter, and not shouted in caps the way the tile label is. */
+.facts span small { display: block; margin-top: 2px; font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--mu); }
+/* "Caught in 1h 12m after it was listed" — the gap between the two tiles. */
+.caught { margin-top: 10px; font-size: 13px; color: var(--mu); }
+.caught b { color: var(--tx); font-weight: 700; }
+.caught .sub { color: var(--mu); }
 .dd-map { height: 220px; margin-top: 10px; border-radius: 12px; overflow: hidden; border: 1px solid var(--bd); background: #141a24; }
 .leaflet-container { background: #141a24; font-family: inherit; }
 .leaflet-container .leaflet-control-attribution { background: #0e1117cc; color: var(--mu); font-size: 10px; }

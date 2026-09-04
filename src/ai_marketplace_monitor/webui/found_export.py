@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from diskcache import Cache  # type: ignore
 
+from ..listing import canonical_url
 from ..utils import CacheType
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,19 @@ def _fallback_url(marketplace: str, listing_id: str) -> str:
     if marketplace == "facebook":
         return f"https://www.facebook.com/marketplace/item/{listing_id}/"
     return ""
+
+
+def _export_url(marketplace: str, post_url: str, listing_id: str) -> str:
+    """The link this CSV hands to whoever opens it.
+
+    A CSV is a link leaving the app, so it gets the same canonical treatment
+    the web UI's Open and Share do -- no `?ref=search`, no `__tn__` click
+    trail. Falls back to reconstructing the address from the id when the
+    listing's details have since been evicted from the cache.
+    """
+    return canonical_url(marketplace, post_url, listing_id) or _fallback_url(
+        marketplace, listing_id
+    )
 
 
 def _sanitize(value: str) -> str:
@@ -170,7 +184,7 @@ def _to_row(
         "seller": details.get("seller", "") or "",
         "condition": details.get("condition", "") or "",
         "notified_user": user,
-        "url": details.get("post_url") or _fallback_url(marketplace, listing_id),
+        "url": _export_url(marketplace, details.get("post_url") or "", listing_id),
     }
 
 

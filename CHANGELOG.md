@@ -10,11 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Web UI rebuilt mobile-first around a review queue: one listing at a time, swipe right to keep / left to
   dismiss, tap for details, Queue / Reviewed / All views, keyboard triage on desktop (`J`/`K`, `→`/`←`,
-  `1`–`5`, `Enter`, `O`, `Z`, `H`, `R`, `?`), grouped-list Items / Sources / Status screens, and a web
+  `1`–`5`, `Enter`, `O`, `C`, `Z`, `H`, `R`, `?`), grouped-list Items / Sources / Status screens, and a web
   app manifest so it can be pinned to a phone home screen. Every previous capability (TOML editor, section
   forms, sources set-up, status, logs, CSV export, noVNC link) is carried over.
 
 ### Added
+- Every listing now carries two clocks: **found** (when the monitor first cached its details) and
+  **listed** (when the seller posted it). Facebook's listing page supplies the second one from the
+  page's own inline `creation_time`, falling back to parsing the rendered "Listed 3 days ago in
+  High Point, NC" line; eBay supplies it from `itemCreationDate` in API mode and from the tile's date
+  on newest-first browser searches; Depop and Poshmark search tiles carry none. Relative wording is
+  resolved to an absolute timestamp at scrape time (via `parsedatetime`) so it cannot drift as the
+  cache ages, and non-English deployments can add the unit words to their `[translation.*]` section.
+  `Listing` gains `listed_at`, `listed_text` and `first_seen`, none of which enter `Listing.hash`, so
+  existing AI ratings keep their join. Review cards show `found 2h ago · listed 3d ago`, the detail
+  view gains **Found** and **Listed** tiles with the absolute local time plus a `Caught in 1h 12m`
+  line, and a **Recently listed** sort orders by the listing time with unknowns last. Listings cached
+  before this shipped show `—` until the monitor re-reads their page.
+- **Share** a listing out of the app: a button in the detail action bar and the `C` key. On a phone
+  with `navigator.share` this opens the system share sheet with the price, title, location and
+  distance; everywhere else it copies the link and confirms with a toast (with a textarea fallback for
+  plain-http LAN addresses, where the clipboard API does not exist). The link is canonical —
+  `https://www.facebook.com/marketplace/item/<id>/` or `https://<host>/itm/<id>` for eBay — so the
+  `?ref=…&__tn__=…` click-tracking Facebook attaches never leaves the app. **Open ↗** uses the same
+  URL; activity rows expose it as `url` and keep the original as `raw_url`.
 - Facebook listings now carry their whole photo gallery instead of one thumbnail. The listing page's
   photos are read from the page already being visited (its inline `listing_photos` JSON, falling back
   to the rendered gallery), de-duplicated to the largest variant of each photo and capped at 12. The

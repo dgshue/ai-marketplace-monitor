@@ -24,7 +24,7 @@
     verdict: "", // All view verdict chip
     rchip: "", // Reviewed view chip: '' | kept | dismissed | notified
     text: "",
-    sort: "score", // score | myrank | distance | newest (persisted)
+    sort: "score", // score | myrank | distance | newest | listed (persisted)
     cursor: null, // rowKey of the current listing
     detail: false, // detail expanded
     undo: [], // [{key, prev}]
@@ -59,8 +59,15 @@
   // expire, so /api/listing-image serves the server-side snapshot. `i` picks
   // the photo; omitting it means photo 0, which is what every caller that
   // predates galleries asks for.
+  // The proxy looks the listing up by the URL it was cached under, which is
+  // the raw one -- `url` has been canonicalized for sharing and may no longer
+  // match the cache key. Older payloads carry no raw_url; they predate the
+  // canonicalization too, so `url` is still the cache key there.
+  const cacheUrl = (row) => row.raw_url || row.url;
   const photoUrl = (row, i) =>
-    row.url && (row.image || photoCount(row)) ? `/api/listing-image?post=${encodeURIComponent(row.url)}${i ? `&i=${i}` : ""}` : "";
+    cacheUrl(row) && (row.image || photoCount(row))
+      ? `/api/listing-image?post=${encodeURIComponent(cacheUrl(row))}${i ? `&i=${i}` : ""}`
+      : "";
   // Facebook listing pages carry a gallery; every other source gives one tile
   // photo, and so do Facebook listings cached before galleries were read.
   const photoCount = (row) => Math.max(Number(row.image_count) || 0, row.image ? 1 : 0);
@@ -79,7 +86,7 @@
   const LAZY_AHEAD = 2;
   const detailPhoto = (row) => {
     const n = photoCount(row);
-    if (!n || !row.url) return "";
+    if (!n || !cacheUrl(row)) return "";
     const slides = Array.from({ length: n }, (_, i) => {
       const url = esc(photoUrl(row, i));
       const src = i < LAZY_AHEAD ? `src="${url}"` : `data-src="${url}"`;
@@ -97,6 +104,40 @@
     return `<div class="ph gal" data-count="${n}"><div class="track" role="group" aria-label="Listing photos">${slides}</div><span class="sc ${scoreClass(row.score)}">${row.score} / 5</span>${srcGlyph(row.marketplace)}${arrows}${dots}${counter}</div>`;
   };
   const priceText = (row) => (row.price && row.price !== "**unspecified**" ? row.price : "—");
+
+  // ---- found vs listed ----
+  // Two different clocks: `first_seen` is when the monitor cached the
+  // listing, `listed_at` is when the seller posted it. The gap between them
+  // is how fast the monitor caught it, which is the number worth knowing.
+  const nowSec = () => Date.now() / 1000;
+  const stampOf = (v) => (typeof v === "number" && isFinite(v) && v > 0 ? v : null);
+  // "2h ago" — fmtDur's compact vocabulary, so it reads the same as every
+  // other duration in the app.
+  const fmtAgo = (epoch) => {
+    const t = stampOf(epoch);
+    return t == null ? "" : fmtDur(nowSec() - t) + " ago";
+  };
+  // Absolute local date and time. The year is only shown when it is not this
+  // one, which keeps the common case short.
+  const fmtWhen = (epoch) => {
+    const t = stampOf(epoch);
+    if (t == null) return "";
+    const d = new Date(t * 1000);
+    const opts = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+    try {
+      return d.toLocaleString(undefined, opts);
+    } catch (_) {
+      return d.toLocaleString();
+    }
+  };
+  // "found 2h ago · listed 3d ago", either half omitted when unknown.
+  const timeBits = (row) => {
+    const bits = [];
+    if (stampOf(row.first_seen) != null) bits.push("found " + fmtAgo(row.first_seen));
+    if (stampOf(row.listed_at) != null) bits.push("listed " + fmtAgo(row.listed_at));
+    return bits;
+  };
   const startOfToday = () => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -112,8 +153,19 @@
       return av - bv || b.score - a.score;
     },
     newest: (a, b) => (b.rated_at || 0) - (a.rated_at || 0) || b.score - a.score,
+    // By the seller's posting time. Listings whose age was never recorded
+    // (any source that does not publish one, and everything cached before
+    // this was read) sort last rather than pretending to be ancient.
+    listed: (a, b) => {
+      const av = stampOf(a.listed_at) || 0;
+      const bv = stampOf(b.listed_at) || 0;
+      if (av === bv) return b.score - a.score;
+      if (!av) return 1;
+      if (!bv) return -1;
+      return bv - av;
+    },
   };
-  const SORT_LABEL = { score: "best rated first", myrank: "my rating first", distance: "nearest first", newest: "newest first" };
+  const SORT_LABEL = { score: "best rated first", myrank: "my rating first", distance: "nearest first", newest: "newest first", listed: "recently listed" };
 
   const textMatch = (row) => {
     const needle = R.text.trim().toLowerCase();
@@ -308,6 +360,59 @@
     render();
     toast(next ? "Rated " + "★".repeat(next) : "Rating cleared", { undo });
   };
+  // ---- sharing ----
+  // The clipboard API only exists on a secure origin, and this UI is very
+  // often opened over plain http at a LAN address. The hidden-textarea
+  // fallback is the old way and still works there.
+  const copyText = async (text) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {
+      /* denied, or not a secure context — fall through */
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return !!ok;
+    } catch (_) {
+      return false;
+    }
+  };
+  // "$4,500 · 2014 Acura RLX SH-AWD · Thomasville, NC · 19.3 mi"
+  const shareText = (row) => {
+    const bits = [priceText(row), row.title, row.location];
+    if (row.distance_mi != null) bits.push(row.distance_mi + " mi");
+    return bits.filter((b) => b && b !== "—").join(" · ");
+  };
+  // Native share sheet where there is one (phones on https), clipboard
+  // everywhere else. Cancelling the sheet is a decision, not a failure: it
+  // must not fall back to a copy and must never surface as an error.
+  const shareListing = async (row) => {
+    if (!row || !row.url) return;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: row.title || "Listing", text: shareText(row), url: row.url });
+        return;
+      } catch (err) {
+        if (err && (err.name === "AbortError" || err.name === "NotAllowedError")) return;
+        /* anything else: the sheet is unavailable, so copy instead */
+      }
+    }
+    const ok = await copyText(row.url);
+    if (ok) toast("Link copied");
+    else toast("Could not copy the link", { error: true });
+  };
+
   const openListing = (row) => {
     if (row && row.url) window.open(row.url, "_blank", "noopener");
   };
@@ -409,6 +514,7 @@
     if (row.location) metaBits.push(esc(row.location));
     if (row.condition) metaBits.push(esc(row.condition));
     if (row.marketplace !== "facebook") metaBits.unshift(esc(marketLabel(row.marketplace)));
+    timeBits(row).forEach((bit) => metaBits.push(esc(bit)));
     const tagCls = verdictClass(row);
     const tagTxt = verdictText(row);
     return `
@@ -517,6 +623,7 @@
     if (route) meta.push(`≈ ${route.minutes} min`);
     if (row.location) meta.push(esc(row.location));
     if (row.marketplace !== "facebook") meta.unshift(esc(marketLabel(row.marketplace)));
+    timeBits(row).forEach((bit) => meta.push(esc(bit)));
     const mine = row.my_rank ? `<span class="mine">★ ${row.my_rank}</span>` : "";
     return `
       <div class="fcard ${row.hidden ? "dis" : ""}" data-key="${esc(rowKey(row))}">
@@ -746,7 +853,16 @@
     const distBits = [];
     if (row.distance_mi != null) distBits.push(`<b>${row.distance_mi} mi away</b>`);
     if (route) distBits.push(`≈ ${route.minutes} min · ${route.miles} mi by road`);
+    // [label, plain text, optional HTML]. The two time tiles carry a second
+    // line, so they need the HTML form; everything else is escaped text.
     const facts = [];
+    const timeFact = (label, epoch) => {
+      const t = stampOf(epoch);
+      if (t == null) return [label, "—"];
+      return [label, fmtWhen(t), `${esc(fmtWhen(t))}<small>${esc(fmtAgo(t))}</small>`];
+    };
+    facts.push(timeFact("Found", row.first_seen));
+    facts.push(timeFact("Listed", row.listed_at));
     if (row.location) facts.push(["Location", row.location]);
     if (row.condition) facts.push(["Condition", row.condition]);
     if (row.seller) facts.push(["Seller", row.seller]);
@@ -754,6 +870,16 @@
     const tierMet = row.score >= row.threshold ? "notify met" : row.score >= reviewThr ? "review met" : "not met";
     facts.push(["Threshold", `review ≥ ${reviewThr} · notify ≥ ${row.threshold} · ${tierMet}`]);
     if (row.notified_at) facts.push(["Notified", row.notified_at]);
+    // How long the listing sat before the monitor found it. Only meaningful
+    // when both clocks are known, and only when found is genuinely after
+    // listed -- a cached row whose first_seen fell back to rated_at can be a
+    // few seconds either side of it.
+    const foundAt = stampOf(row.first_seen);
+    const listedAt = stampOf(row.listed_at);
+    const caught =
+      foundAt != null && listedAt != null && foundAt - listedAt > 60
+        ? `<p class="caught">Caught in <b>${esc(fmtDur(foundAt - listedAt))}</b> <span class="sub">after it was listed</span></p>`
+        : "";
     const showMap = !!(row.coords && R.home && row.marketplace === "facebook" && window.L);
     const RATE = ["pass", "meh", "maybe", "good", "must see"];
     return `
@@ -771,7 +897,8 @@
         <p class="dist" id="dd-drive-line">${distBits.join(" · ")}<span id="dd-drive">${route || row.distance_mi == null ? "" : ""}</span></p>
       </div>
       <div class="sec">
-        <div class="facts">${facts.map(([k, v]) => `<div><small>${esc(k)}</small><span>${esc(v)}</span></div>`).join("")}</div>
+        <div class="facts">${facts.map(([k, v, html]) => `<div><small>${esc(k)}</small><span>${html || esc(v)}</span></div>`).join("")}</div>
+        ${caught}
         ${showMap ? '<div id="dd-map" class="dd-map"></div>' : ""}
       </div>
       <div class="sec"><h4>Why the AI scored it ${row.score} / 5${row.ai_name ? ` <span class="sub">· ${esc(row.ai_name)}</span>` : ""}</h4>
@@ -782,6 +909,7 @@
       <div class="actbar">
         <button class="btn no" data-flag="hide" id="dd-dismiss">${row.hidden ? "↶ Restore" : "✕ Dismiss"}</button>
         ${row.url ? `<a class="btn pri" id="dd-open" href="${esc(row.url)}" target="_blank" rel="noopener">Open ↗</a>` : ""}
+        ${row.url ? `<button class="btn" id="dd-share" title="Share (C)" aria-label="Share this listing">↗ Share</button>` : ""}
         <button class="btn yes ${row.kept ? "on" : ""}" data-flag="keep" id="dd-keep">${row.kept ? "★ Kept" : "★ Keep"}</button>
       </div>`;
   };
@@ -1164,6 +1292,10 @@
       decide(current(), "keep");
       return;
     }
+    if (e.target.closest("#dd-share")) {
+      shareListing(current());
+      return;
+    }
   });
   $("#act-keep").addEventListener("click", () => throwCard($("#stack .tcard.top"), "keep"));
   $("#act-dismiss").addEventListener("click", () => throwCard($("#stack .tcard.top"), "dismiss"));
@@ -1286,6 +1418,9 @@
     } else if (key === "o" || key === "O") {
       openListing(row);
       handled();
+    } else if (key === "c" || key === "C") {
+      shareListing(row);
+      handled();
     } else if (key === "z" || key === "Z") {
       undo();
       handled();
@@ -1324,6 +1459,10 @@
     swipe: { SWIPE_FRACTION, FLING_VELOCITY, LOCK_PX },
     photoCount,
     photoUrl,
+    share: shareListing,
+    shareText,
+    fmtAgo,
+    fmtWhen,
     gallery: { index: galIndex, move: movePhoto, to: scrollGalTo, open: openLightbox, close: closeLightbox, isOpen: lightboxOpen },
   });
 })();

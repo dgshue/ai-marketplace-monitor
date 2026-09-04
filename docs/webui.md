@@ -10,9 +10,22 @@ The web UI is mobile-first and can be pinned to a phone's home screen. It has fo
 
 - **Review** — the listings the AI has rated, one card at a time. Swipe right (or press `→` / `S`) to keep,
   swipe left (`←` / `X`) to dismiss, tap (`Enter`) for the full detail with a swipeable photo carousel, facts, pickup map, drive
-  time and the AI's reasoning; rate `1`–`5`, undo with `Z`. *Queue* holds what you have not decided on,
+  time and the AI's reasoning; rate `1`–`5`, undo with `Z`, share the listing with `C`. *Queue* holds what you have not decided on,
   *Reviewed* what you have, *All* everything with item / verdict / text filters, sorting and CSV export.
   On a desktop the queue is a left rail and the whole flow is keyboard-driven (`?` shows every key).
+
+  Every card shows two clocks — **found** (when the monitor first cached the listing) and **listed**
+  (when the seller posted it) — as `found 2h ago · listed 3d ago`. The detail view spells both out as
+  local dates in the *Found* and *Listed* tiles and adds a `Caught in 1h 12m` line for the gap between
+  them. `listed` reads `—` when the source did not publish one: Facebook listing pages do, eBay does in
+  API mode and on newest-first search pages, and Depop and Poshmark search tiles do not. Listings that
+  were already in the cache before this shipped show no listing time until the monitor re-reads their
+  page. The **Recently listed** sort orders by that clock, with unknowns last.
+
+  **Share** (the button in the detail action bar, or `C`) opens the phone's share sheet where there is
+  one and otherwise copies the link to the clipboard. The link shared is the canonical one —
+  `https://www.facebook.com/marketplace/item/<id>/` — with the `?ref=…&__tn__=…` tracking parameters
+  Facebook attaches to a search click stripped off.
 - **Items** — one grouped-list editor per item: search phrases, description, price range, notify
   threshold, exclusions, sources, schedule and pause. Inline edits save automatically; **More settings**
   opens the full form. A **Form / TOML** switch exposes the raw config with syntax highlighting, auto-validation

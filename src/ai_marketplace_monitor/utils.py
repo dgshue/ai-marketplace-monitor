@@ -1,4 +1,5 @@
 import copy
+import datetime
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ from dataclasses import asdict, dataclass, fields
 from enum import Enum
 from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, TypeVar
+from typing import Any, Dict, Iterable, List, Tuple, TypeVar
 
 import parsedatetime  # type: ignore
 import requests  # type: ignore
@@ -771,6 +772,210 @@ class Translator:
     def __call__(self: "Translator", word: str) -> str:
         """Return translated version"""
         return self._dictionary.get(word, word)
+
+
+# ---------------------------------------------------------------------------
+# "Listed 3 days ago" -> an absolute moment in time.
+#
+# Marketplaces word a listing's age relatively, and a relative phrase rots:
+# "3 days ago" cached on Monday still reads "3 days ago" on Friday. So the
+# phrase is resolved to an epoch at scrape time and only the epoch is stored.
+#
+# The arithmetic is not hand-rolled. `parsedatetime` is already a dependency
+# (convert_to_seconds uses it) and is the mature, well-tested implementation
+# of exactly this, month lengths and DST included. What is added here is
+# recognition: a regex that pulls the time phrase out of the surrounding copy
+# ("Listed 3 days ago in High Point, NC") before parsedatetime sees it, so a
+# location that happens to read like a date -- "March, PA" -- cannot be
+# mistaken for one. Recognition is also where translation belongs, because
+# parsedatetime's own locale support needs PyICU while this scraper's
+# translations come from the user's [translation.*] config.
+# ---------------------------------------------------------------------------
+
+# Word -> the canonical English plural parsedatetime is handed. Abbreviations
+# are in the table because tiles use them ("2 hrs ago").
+RELATIVE_UNITS: Dict[str, str] = {
+    "second": "seconds",
+    "seconds": "seconds",
+    "sec": "seconds",
+    "secs": "seconds",
+    "minute": "minutes",
+    "minutes": "minutes",
+    "min": "minutes",
+    "mins": "minutes",
+    "hour": "hours",
+    "hours": "hours",
+    "hr": "hours",
+    "hrs": "hours",
+    "day": "days",
+    "days": "days",
+    "week": "weeks",
+    "weeks": "weeks",
+    "month": "months",
+    "months": "months",
+    "year": "years",
+    "years": "years",
+}
+
+# Quantity words meaning one. Facebook writes "Listed a week ago" far more
+# often than "Listed 1 week ago".
+RELATIVE_ONES: Tuple[str, ...] = ("a", "an", "one")
+
+# Vagueness Facebook adds once a listing is old enough that it stops counting
+# precisely ("Listed over 2 weeks ago"). Dropped: the number is the signal.
+RELATIVE_HEDGES: Tuple[str, ...] = (
+    "about",
+    "almost",
+    "approximately",
+    "around",
+    "more than",
+    "nearly",
+    "over",
+    "roughly",
+)
+
+# Phrases meaning "moments ago" that carry no number. parsedatetime reports
+# them unparseable, so they are resolved here to the reference time.
+RELATIVE_NOW: Tuple[str, ...] = (
+    "just now",
+    "just listed",
+    "a few seconds ago",
+    "a few moments ago",
+    "a moment ago",
+    "moments ago",
+    "seconds ago",
+    "less than a minute ago",
+    "today",
+)
+
+RELATIVE_YESTERDAY: Tuple[str, ...] = ("yesterday",)
+
+# Keys a non-English deployment can define in [translation.<lang>] to make the
+# relative form readable there too. A missing key translates to itself, which
+# only means the English wording stays the only one matched -- and on Facebook
+# the page's inline `creation_time` supplies the timestamp regardless.
+RELATIVE_TRANSLATABLE: Tuple[str, ...] = (
+    *RELATIVE_UNITS,
+    "a",
+    "ago",
+    "yesterday",
+    "just now",
+)
+
+_WHITESPACE = re.compile(r"[\s\u2009\u202f]+")
+
+
+def normalize_relative_text(text: str) -> str:
+    """Lower-cased, single-spaced, non-breaking spaces folded away."""
+    # \s already covers U+00A0 for str patterns; the explicit fold is for the
+    # narrow/thin spaces Facebook slips between a number and its unit.
+    return _WHITESPACE.sub(" ", text or "").strip().lower()
+
+
+def _relative_vocabulary(
+    translator: "Translator | None" = None,
+) -> Tuple[Dict[str, str], List[str], List[str], List[str], List[str]]:
+    """(unit word -> canonical unit, one-words, ago-words, instants, yesterdays)."""
+    units = dict(RELATIVE_UNITS)
+    ones = list(RELATIVE_ONES)
+    agos = ["ago"]
+    instants = list(RELATIVE_NOW)
+    yesterdays = list(RELATIVE_YESTERDAY)
+    if translator is None:
+        return units, ones, agos, instants, yesterdays
+    for word in RELATIVE_TRANSLATABLE:
+        local = normalize_relative_text(translator(word))
+        if not local or local == word:
+            continue
+        if word in RELATIVE_UNITS:
+            units[local] = RELATIVE_UNITS[word]
+        elif word == "a":
+            ones.append(local)
+        elif word == "ago":
+            agos.append(local)
+        elif word == "yesterday":
+            yesterdays.append(local)
+        else:
+            instants.append(local)
+    return units, ones, agos, instants, yesterdays
+
+
+def _alternation(words: Iterable[str]) -> str:
+    """Longest-first alternation, so "minutes" is never cut short by "min"."""
+    return "|".join(re.escape(w) for w in sorted(set(words), key=len, reverse=True))
+
+
+def relative_time_phrase(text: str, translator: "Translator | None" = None) -> Tuple[str, str]:
+    """Pull a relative-time phrase out of the surrounding copy.
+
+    Returns ``(canonical, spoken)``: the phrase rewritten in the English
+    parsedatetime understands, and the phrase exactly as the page worded it.
+    ``("", "")`` when the text carries no relative time at all -- a location,
+    an empty node, or a locale whose words are not in the translation table.
+    """
+    haystack = normalize_relative_text(text)
+    if not haystack:
+        return "", ""
+    units, ones, agos, instants, yesterdays = _relative_vocabulary(translator)
+
+    hedge = _alternation(RELATIVE_HEDGES)
+    body = (
+        rf"(?:(?:{hedge})\s+)?"
+        rf"(?P<qty>\d{{1,4}}|{_alternation(ones)})\s*"
+        rf"(?P<unit>{_alternation(units)})\b"
+    )
+    ago = _alternation(agos)
+    # The "ago" word follows the quantity in English and Swedish and leads it
+    # in Spanish ("hace 3 dias"); one side or the other has to be there, or
+    # "2 bedrooms" in a rental blurb would read as a timestamp. The numeric
+    # forms are tried before the wordless ones because "seconds ago" is a
+    # substring of "30 seconds ago".
+    for pattern in (rf"{body}\s+(?:{ago})\b", rf"(?:{ago})\s+{body}"):
+        match = re.search(pattern, haystack)
+        if match is None:
+            continue
+        quantity = match.group("qty")
+        count = 1 if quantity in ones else int(quantity)
+        return f"{count} {units[match.group('unit')]} ago", match.group(0).strip()
+
+    for phrase in sorted(set(instants), key=len, reverse=True):
+        if phrase and phrase in haystack:
+            return "now", phrase
+    for phrase in sorted(set(yesterdays), key=len, reverse=True):
+        if phrase and phrase in haystack:
+            return "yesterday", phrase
+    return "", ""
+
+
+def parse_relative_time(
+    text: str,
+    now: float | None = None,
+    translator: "Translator | None" = None,
+) -> float | None:
+    """Epoch seconds for a relative phrase, or None when there is not one.
+
+    Never returns a moment in the future: a listing cannot have been posted
+    after the page describing it was rendered, so a forward-looking parse is a
+    misreading and is reported as "unknown" instead.
+    """
+    canonical, _ = relative_time_phrase(text, translator)
+    if not canonical:
+        return None
+    reference = time.time() if now is None else float(now)
+    if canonical == "now":
+        return reference
+    # Context style, like convert_to_seconds above: the flag style is
+    # deprecated, and `hasDateOrTime` is the honest "did it parse anything"
+    # answer -- the context object itself is always truthy.
+    parsed, context = parsedatetime.Calendar(version=parsedatetime.VERSION_CONTEXT_STYLE).parseDT(
+        canonical, sourceTime=datetime.datetime.fromtimestamp(reference)
+    )
+    if not context.hasDateOrTime:
+        return None
+    stamp = parsed.timestamp()
+    # A minute of slack absorbs clock skew between the page's server and this
+    # machine; anything further ahead is a misread, not a fresh listing.
+    return None if stamp > reference + 60 else stamp
 
 
 # ---------------------------------------------------------------------------

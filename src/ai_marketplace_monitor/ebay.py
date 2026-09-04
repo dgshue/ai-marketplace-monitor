@@ -21,6 +21,7 @@ Keep credentials out of config.toml with ${EBAY_CLIENT_ID} / ${EBAY_CLIENT_SECRE
 from __future__ import annotations
 
 import base64
+import datetime
 import re
 import time
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ import requests  # type: ignore
 from .browser_market import DEFAULT_MAX_LISTINGS, BrowserItemConfig, BrowserTileMarketplace
 from .listing import Listing
 from .marketplace import MARKETPLACE_DISPLAY_NAMES, MarketPlace, Marketplace, MarketplaceConfig
-from .utils import CounterItem, counter, hilight
+from .utils import CounterItem, counter, hilight, parse_relative_time
 
 # Production endpoints. The sandbox equivalents return synthetic inventory that
 # is useless for deal-hunting, so they are not offered as an option.
@@ -54,6 +55,54 @@ VALID_BUYING_OPTIONS = {"FIXED_PRICE", "AUCTION", "BEST_OFFER", "CLASSIFIED_AD"}
 # How a search is performed. "api" needs credentials; "browser" needs the
 # shared Chromium and nothing else.
 VALID_MODES = ("api", "browser")
+
+# How eBay writes a listing's date on a search tile, newest-first. Both forms
+# appear: the short one on items listed inside the current year, the long one
+# once they roll over. Anything else (a relative phrase, an auction's
+# "time left") is handed to the shared relative-time parser instead.
+TILE_DATE_FORMATS = ("%b-%d %H:%M", "%b %d, %Y", "%b-%d-%Y %H:%M")
+
+
+def _parse_tile_date(text: str, now: float | None = None) -> float | None:
+    """A search tile's listing date as an epoch, or None.
+
+    Tries the relative wording first (it is the shared, translated path), then
+    eBay's own absolute formats. The short format carries no year, so it is
+    read as the current one and rolled back a year if that would put the
+    listing in the future.
+    """
+    reference = time.time() if now is None else float(now)
+    stamp = parse_relative_time(text, now=reference)
+    if stamp is not None:
+        return stamp
+    candidate = " ".join((text or "").split())
+    if not candidate:
+        return None
+    today = datetime.datetime.fromtimestamp(reference)
+    for fmt in TILE_DATE_FORMATS:
+        try:
+            parsed = datetime.datetime.strptime(candidate, fmt)
+        except ValueError:
+            continue
+        if "%Y" not in fmt:
+            parsed = parsed.replace(year=today.year)
+            if parsed.timestamp() > reference + 86400:
+                parsed = parsed.replace(year=today.year - 1)
+        value = parsed.timestamp()
+        return None if value > reference + 86400 else value
+    return None
+
+
+def _parse_item_creation_date(value: Any) -> float | None:
+    """`itemCreationDate` from the Browse API: ISO 8601, always UTC ("...Z")."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Browser mode
@@ -367,6 +416,14 @@ class EbayBrowserMarketplace(BrowserTileMarketplace):
               '.s-card__attribute-row, .s-item__location, .s-item__itemLocation'
             )
           ).map((e) => clean(e.innerText)),
+          // Newest-first results carry the listing date; relevance-sorted
+          // ones often do not, and auctions show time-left here instead.
+          // Collected raw and sorted out in Python.
+          dates: Array.from(
+            li.querySelectorAll(
+              '.s-item__listingDate, .s-card__listingDate, .s-item__dynamic, .s-card__caption'
+            )
+          ).map((e) => clean(e.innerText)),
         });
       });
       return out;
@@ -444,6 +501,18 @@ class EbayBrowserMarketplace(BrowserTileMarketplace):
                 location = match.group(1).strip()
                 break
 
+        # Only newest-first pages reliably render a date, so this is often
+        # empty -- "unknown" is the honest answer, not a guess from the sort
+        # position.
+        listed_at: float | None = None
+        listed_text = ""
+        for raw in tile.get("dates") or []:
+            text = re.sub(r"(?i)^listed\s+", "", str(raw).strip())
+            stamp = _parse_tile_date(text)
+            if stamp is not None:
+                listed_at, listed_text = stamp, text
+                break
+
         return Listing(
             marketplace="ebay",
             # Left empty to match every other backend: the item name is
@@ -462,6 +531,8 @@ class EbayBrowserMarketplace(BrowserTileMarketplace):
             seller="",
             condition=condition,
             description="",
+            listed_at=listed_at,
+            listed_text=listed_text,
         )
 
 
@@ -645,6 +716,9 @@ class EbayMarketplace(Marketplace):
             seller=str(seller.get("username") or ""),
             condition=str(item.get("condition") or ""),
             description=str(item.get("shortDescription") or ""),
+            # Browse returns the seller's posting time outright -- an exact
+            # ISO timestamp, no relative wording to unpick.
+            listed_at=_parse_item_creation_date(item.get("itemCreationDate")),
         )
 
     def search(

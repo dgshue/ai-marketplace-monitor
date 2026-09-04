@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from diskcache import Cache  # type: ignore
 
-from ..listing import Listing
+from ..listing import Listing, canonical_url
 from ..utils import CacheType
 from .geo import Coordinates, distance_from, resolve
 
@@ -383,7 +383,29 @@ def build_activity(
                     "distance_mi": distance_from(home, listing.location or ""),
                     "seller": listing.seller,
                     "condition": listing.condition,
-                    "url": listing.post_url,
+                    # The shareable address: no `?ref=`, no `__tn__`, no
+                    # per-click tracking string. This is what Open and Share
+                    # use, and what a pasted link should look like.
+                    "url": canonical_url(listing.marketplace, listing.post_url, listing.id),
+                    # The URL exactly as cached. It is the photo proxy's key
+                    # (/api/listing-image looks LISTING_DETAILS up by it), so
+                    # it has to survive the canonicalization above.
+                    "raw_url": listing.post_url,
+                    # When the seller posted it, absolute. None for every row
+                    # cached before this was read, and for sources whose
+                    # tiles carry no date -- the UI shows those as unknown
+                    # rather than guessing.
+                    "listed_at": listing.listed_at,
+                    "listed_text": listing.listed_text or "",
+                    # When the monitor first cached this listing's details.
+                    # Rows written before the stamp existed fall back to the
+                    # moment they were rated, which is within one search pass
+                    # of when they were found.
+                    "first_seen": (
+                        listing.first_seen
+                        if isinstance(listing.first_seen, (int, float))
+                        else rating.get("rated_at")
+                    ),
                     "score": score,
                     "conclusion": CONCLUSIONS.get(score, ""),
                     "comment": rating.get("comment", "") or "",
