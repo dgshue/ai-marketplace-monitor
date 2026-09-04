@@ -15,7 +15,7 @@ of anybody's face".
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator, List
+from typing import Any, Dict, Iterator, List
 
 import pytest
 from diskcache import Cache  # type: ignore
@@ -189,8 +189,8 @@ def test_tile_photo_is_the_fallback_when_the_page_yielded_nothing() -> None:
 # ------------------------------------------------------------------- model
 
 
-def _listing(**over: object) -> Listing:
-    fields = {
+def _listing(**over: Any) -> Listing:
+    fields: Dict[str, Any] = {
         "marketplace": "facebook",
         "name": "",
         "id": "42",
@@ -279,12 +279,12 @@ def test_a_listing_with_one_photo_still_snapshots_it() -> None:
 
 
 @pytest.mark.parametrize("value,expected", [(None, None), (0, 0), (3, 3), ("4", 4), (12, 12)])
-def test_max_images_accepts(value: object, expected: object) -> None:
+def test_max_images_accepts(value: Any, expected: Any) -> None:
     assert MarketItemCommonConfig(name="x", max_images=value).max_images == expected  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", [-1, 13, True, "many", 2.5])
-def test_max_images_rejects(value: object) -> None:
+def test_max_images_rejects(value: Any) -> None:
     with pytest.raises(ValueError):
         MarketItemCommonConfig(name="x", max_images=value)  # type: ignore[arg-type]
 
