@@ -15,6 +15,7 @@ import pytest
 
 from ai_marketplace_monitor.ai import AIResponse
 from ai_marketplace_monitor.listing import Listing
+from ai_marketplace_monitor.marketplace import ItemConfig
 from ai_marketplace_monitor.notification import (
     NotificationStatus,
     NotifyContext,
@@ -50,6 +51,15 @@ def make_listing(**overrides: Any) -> Listing:
 
 def rating(score: int = 5, comment: str = "Priced $2k under comparable listings.") -> AIResponse:
     return AIResponse(score=score, comment=comment, name="qa")
+
+
+def item_config(name: str = "qaitem") -> ItemConfig:
+    """A real item config -- ``User.notify`` is generic over one.
+
+    Only ``name`` is read on the notification path (the counter is keyed by
+    it), but a stand-in namespace is not a type mypy accepts.
+    """
+    return ItemConfig(name=name, search_phrases=["qa"])
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +399,6 @@ class TestUserBookkeeping:
         id, user); a batch that recorded one row for the whole search would
         make every listing share a reminder clock.
         """
-        from types import SimpleNamespace
-
         from diskcache import Cache  # type: ignore
 
         from ai_marketplace_monitor.user import User, UserConfig
@@ -413,7 +421,7 @@ class TestUserBookkeeping:
             user.notify(
                 listings,
                 [rating()] * 3,
-                SimpleNamespace(name="qaitem"),
+                item_config(),
                 local_cache=local,
                 context=NotifyContext(notify_threshold=4),
             )
@@ -449,8 +457,6 @@ def test_a_listing_no_backend_could_send_is_not_recorded(tmp_path: Any) -> None:
     Before, one successful message marked the whole search notified; a listing
     that never made it would then never be retried.
     """
-    from types import SimpleNamespace
-
     from diskcache import Cache  # type: ignore
 
     from ai_marketplace_monitor.user import User, UserConfig
@@ -469,7 +475,7 @@ def test_a_listing_no_backend_could_send_is_not_recorded(tmp_path: Any) -> None:
     bad = MagicMock()
     bad.raise_for_status.side_effect = RuntimeError("500")
     with patch("ai_marketplace_monitor.ntfy.requests.post", side_effect=[ok, bad]):
-        user.notify(listings, [rating()] * 2, SimpleNamespace(name="qaitem"), local_cache=local)
+        user.notify(listings, [rating()] * 2, item_config(), local_cache=local)
 
     assert user.notification_status(listings[0], local) == NotificationStatus.NOTIFIED
     assert user.notification_status(listings[1], local) == NotificationStatus.NOT_NOTIFIED
