@@ -8,7 +8,6 @@ from the main thread to that loop via ``loop.call_soon_threadsafe``.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import ipaddress
 import json
 import logging
@@ -38,7 +37,14 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..utils import CacheType, amm_home, browser_state_file, cache
+from ..utils import (
+    CacheType,
+    amm_home,
+    browser_state_file,
+    cache,
+    fetch_image_snapshot,
+    image_cache_path,
+)
 from .activity import build_activity
 from .auth import (
     CSRF_COOKIE,
@@ -777,45 +783,30 @@ def create_app(
     # listing post URL, which must already exist as a LISTING_DETAILS cache
     # key, and the fetch goes only to the image URL the scraper stored there.
     # ------------------------------------------------------------------
-    img_cache_dir = amm_home / "imgcache"
-
     @app.get("/api/listing-image")
-    def listing_image(post: str, _: str = Depends(require_session)) -> FileResponse:
-        import requests as _requests  # type: ignore  # local: server module stays uvicorn-only otherwise
-
+    def listing_image(post: str, i: int = 0, _: str = Depends(require_session)) -> FileResponse:
         normalized = post.split("?")[0]
         details = cache.get((CacheType.LISTING_DETAILS.value, normalized))
         if not isinstance(details, dict):
             raise HTTPException(status_code=404, detail="Unknown listing.")
-        image_url = str(details.get("image") or "")
+        # `images` is the gallery; rows cached before it existed have only
+        # `image`, and for them index 0 is still the one photo there is.
+        gallery = [str(url) for url in (details.get("images") or []) if url]
+        if not gallery and details.get("image"):
+            gallery = [str(details["image"])]
+        if i < 0 or i >= len(gallery):
+            raise HTTPException(status_code=404, detail="No such photo.")
+        image_url = gallery[i]
         if not image_url.startswith(("http://", "https://")):
             raise HTTPException(status_code=404, detail="Listing has no image.")
 
-        img_cache_dir.mkdir(parents=True, exist_ok=True)
-        key = hashlib.sha256(normalized.encode()).hexdigest()[:32]
-        cached = img_cache_dir / (key + ".img")
-        if not cached.exists():
-            try:
-                resp = _requests.get(
-                    image_url,
-                    timeout=15,
-                    headers={
-                        # A plain browser UA and no referrer is what the CDN
-                        # expects from a direct visit.
-                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    },
-                    stream=True,
-                )
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=404, detail="Image expired.")
-                content = resp.raw.read(5 * 1024 * 1024 + 1, decode_content=True)
-                if len(content) > 5 * 1024 * 1024:
-                    raise HTTPException(status_code=404, detail="Image too large.")
-                cached.write_bytes(content)
-            except HTTPException:
-                raise
-            except Exception:
-                raise HTTPException(status_code=404, detail="Image fetch failed.") from None
+        cached = image_cache_path(normalized, i)
+        # A miss means the monitor never pre-warmed this one (an old listing,
+        # or one rated before snapshotting existed) -- fetch it now, exactly
+        # as this endpoint always has. If the CDN URL has expired since, that
+        # is a clean 404 and the UI hides the slide.
+        if not cached.exists() and not fetch_image_snapshot(image_url, cached):
+            raise HTTPException(status_code=404, detail="Image expired.")
         return FileResponse(
             cached,
             media_type="image/jpeg",

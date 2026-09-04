@@ -9,7 +9,7 @@ AI Marketplace Monitor includes a built-in web interface for editing your config
 The web UI is mobile-first and can be pinned to a phone's home screen. It has four screens:
 
 - **Review** — the listings the AI has rated, one card at a time. Swipe right (or press `→` / `S`) to keep,
-  swipe left (`←` / `X`) to dismiss, tap (`Enter`) for the full detail with photo, facts, pickup map, drive
+  swipe left (`←` / `X`) to dismiss, tap (`Enter`) for the full detail with a swipeable photo carousel, facts, pickup map, drive
   time and the AI's reasoning; rate `1`–`5`, undo with `Z`. *Queue* holds what you have not decided on,
   *Reviewed* what you have, *All* everything with item / verdict / text filters, sorting and CSV export.
   On a desktop the queue is a left rail and the whole flow is keyboard-driven (`?` shows every key).

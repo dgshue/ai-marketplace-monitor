@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forms, sources set-up, status, logs, CSV export, noVNC link) is carried over.
 
 ### Added
+- Facebook listings now carry their whole photo gallery instead of one thumbnail. The listing page's
+  photos are read from the page already being visited (its inline `listing_photos` JSON, falling back
+  to the rendered gallery), de-duplicated to the largest variant of each photo and capped at 12. The
+  web UI's detail view shows them as a swipeable scroll-snap carousel with dots, desktop arrows, a
+  tap-to-open full-screen lightbox and lazy slides; `,` / `.` (or `Shift`+`←`/`→`) move between
+  photos, while `←` / `→` keep their meaning of dismiss / keep. `Listing` gains `images`, activity
+  rows gain `images` and `image_count`, and `/api/listing-image` takes `i=<index>`.
+- Option `max_images` (marketplace-level, overridable per item, default 6, maximum 12, `0` to
+  disable): how many of a listing's photos to copy to disk once it reaches the review threshold.
+  Facebook's image links are signed and expire within days, so photos are snapshotted in the
+  background — two workers, off the search loop — while the listing is still fresh. eBay, Depop and
+  Poshmark are read from search tiles that carry one photo each, so they are unaffected.
 - Option `review_rating` (marketplace-level, overridable per item, 1-5, default 3) splitting the AI score
   into three tiers: below `review_rating` a listing is rated once, cached and only tracked; at or above it
   the listing enters the web UI's review queue; at or above `rating` it also sends a notification.
@@ -26,6 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the review queue is derived from the user's own decisions (kept, hidden, or rated).
 
 ### Fixed
+- Listing cards showed a **person instead of the item** — a Facebook friend's profile picture, or a
+  family photo on a car listing. Both the search-tile parser and the listing-page scraper took the
+  first `<img>` they found, which is the signed-in account's avatar whenever Facebook renders the
+  page chrome and the seller's avatar on tiles that carry one. Of 204 listings cached before this
+  fix, 49 had a profile picture as their photo and 24 had a video URL. Photos are now identified by
+  their Facebook CDN photo type — profile pictures use the `-1` subtype (`t39.30808-1`, `t1.6435-1`)
+  and videos come from `video-*.fbcdn.net` — and images inside a seller-profile link, a link to a
+  different listing, or requested at icon size are excluded. A listing with no usable photo now
+  shows no photo rather than a stranger's face. Email notifications, which embed `image`, were
+  showing the same wrong pictures and are fixed by the same change. Listings re-encountered after
+  this release correct themselves; run `aimm --check <url>` on an older one to refresh it sooner.
 - Facebook vehicle listings cached a wrong price: vehicle detail pages have no price element, so the
   detail scraper fell back to the first `$...` in the seller's description — the down payment on a dealer
   listing (`$550` for a $5,500 Civic). The value is plausible, so the junk-artifact filter let it through.

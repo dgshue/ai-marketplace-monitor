@@ -1,11 +1,12 @@
 import os
+import queue
 import socket
 import sys
 import threading
 import time
 from logging import Logger
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Tuple
 
 import humanize
 import inflect
@@ -20,6 +21,7 @@ from .config import Config, supported_ai_backends, supported_marketplaces
 from .listing import Listing
 from .marketplace import (
     DEFAULT_BLOCK_COOLDOWN,
+    DEFAULT_MAX_IMAGES,
     DEFAULT_RATING,
     DEFAULT_REVIEW_RATING,
     BlockTracker,
@@ -41,10 +43,108 @@ from .utils import (
     calculate_file_hash,
     counter,
     doze,
+    fetch_image_snapshot,
     hilight,
+    image_cache_path,
     read_monitor_state,
     write_monitor_state,
 )
+
+# ---------------------------------------------------------------------------
+# Photo pre-warming.
+#
+# A Facebook CDN URL is signed and expires in days, so a photo that is not
+# copied to disk while the listing is fresh is a broken image by the time the
+# queue is opened. The web UI's photo proxy already snapshots on demand; this
+# does it ahead of time, the moment a listing is rated worth reviewing, so
+# the gallery is on disk before anyone asks for it.
+#
+# Two workers, on purpose. These are plain CDN GETs and not Facebook page
+# loads -- they carry no session and are not what gets an account blocked --
+# but a burst of forty listings x six photos still has no business competing
+# with the search loop for bandwidth. The queue is bounded and drops rather
+# than blocks: a missed pre-warm costs one on-demand fetch later, whereas a
+# blocked search loop costs the whole pass.
+# ---------------------------------------------------------------------------
+_SNAPSHOT_WORKERS = 2
+_SNAPSHOT_QUEUE_LIMIT = 512
+_SNAPSHOT_SEEN_LIMIT = 5000
+
+
+class PhotoSnapshotter:
+    """Background downloader for the photos of review-worthy listings."""
+
+    def __init__(self: "PhotoSnapshotter", logger: Logger | None = None) -> None:
+        self.logger = logger
+        self._queue: "queue.Queue[Tuple[str, List[str]]]" = queue.Queue(
+            maxsize=_SNAPSHOT_QUEUE_LIMIT
+        )
+        self._threads: List[threading.Thread] = []
+        self._seen: set = set()
+        self._lock = threading.Lock()
+
+    def _start(self: "PhotoSnapshotter") -> None:
+        if self._threads:
+            return
+        for idx in range(_SNAPSHOT_WORKERS):
+            thread = threading.Thread(target=self._run, name=f"photo-snapshot-{idx}", daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def _run(self: "PhotoSnapshotter") -> None:
+        while True:
+            post_url, urls = self._queue.get()
+            try:
+                for index, url in enumerate(urls):
+                    destination = image_cache_path(post_url, index)
+                    if destination.exists():
+                        continue
+                    fetch_image_snapshot(url, destination)
+            except KeyboardInterrupt:  # pragma: no cover - worker shutdown
+                return
+            except Exception as e:  # pragma: no cover - best effort by design
+                if self.logger:
+                    self.logger.debug(f"{hilight('[Photo]', 'fail')} snapshot failed: {e}")
+            finally:
+                self._queue.task_done()
+
+    def submit(self: "PhotoSnapshotter", post_url: str, urls: List[str]) -> bool:
+        """Queue a listing's photos. False when there is nothing to do."""
+        wanted = [url for url in urls if url]
+        if not post_url or not wanted:
+            return False
+        key = post_url.split("?")[0]
+        with self._lock:
+            if key in self._seen:
+                return False
+            # "Already handled this listing" only needs to hold for the
+            # current run of searches; the monitor runs for months, and an
+            # unbounded set of every URL it ever saw is a slow leak. Dropping
+            # the whole set costs at most one repeat pass, and the worker
+            # skips snapshots that are already on disk anyway.
+            if len(self._seen) >= _SNAPSHOT_SEEN_LIMIT:
+                self._seen.clear()
+            self._seen.add(key)
+        self._start()
+        try:
+            self._queue.put_nowait((key, wanted))
+        except queue.Full:
+            return False
+        return True
+
+
+def photos_to_snapshot(
+    listing: Listing, score: int, review_rating: int, max_images: int
+) -> List[str]:
+    """Which photos of a listing are worth keeping, if any.
+
+    Below the review threshold a listing never reaches the queue, so its
+    photos are bytes nobody will look at -- the rating is cached and that is
+    the end of it. `max_images` of 0 turns snapshotting off entirely.
+    """
+    if score < review_rating or max_images <= 0:
+        return []
+    return listing.photos[:max_images]
 
 
 class MarketplaceMonitor:
@@ -89,6 +189,9 @@ class MarketplaceMonitor:
         # Marketplaces sitting out a block cooldown. Written by the monitor
         # thread, read by the web thread; see BlockTracker for the locking.
         self.block_tracker = BlockTracker()
+        # Copies the photos of review-worthy listings to disk in the
+        # background; its threads start lazily on the first submission.
+        self.photo_snapshotter = PhotoSnapshotter(logger)
         self.playwright: Playwright = sync_playwright().start()
         self.browser: Browser | None = None
         self.logger = logger
@@ -578,6 +681,22 @@ class MarketplaceMonitor:
             review_rating = self._threshold_for(
                 "review_rating", item_config, marketplace_config, DEFAULT_REVIEW_RATING
             )
+            # Photos, in the background, for anything that will show up in the
+            # review queue. Done here rather than after the loop because a
+            # pass can be interrupted at any listing, and a photo snapshotted
+            # an hour late is a photo whose URL has already expired.
+            max_images = (
+                item_config.max_images
+                if item_config.max_images is not None
+                else (
+                    marketplace_config.max_images
+                    if marketplace_config.max_images is not None
+                    else DEFAULT_MAX_IMAGES
+                )
+            )
+            wanted = photos_to_snapshot(listing, res.score, review_rating, max_images)
+            if wanted:
+                self.photo_snapshotter.submit(listing.post_url, wanted)
 
             if res.score < acceptable_rating:
                 if self.logger:

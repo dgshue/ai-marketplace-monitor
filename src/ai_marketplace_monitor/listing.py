@@ -1,5 +1,5 @@
-from dataclasses import asdict, dataclass
-from typing import Optional, Tuple, Type
+from dataclasses import asdict, dataclass, field
+from typing import List, Optional, Tuple, Type
 
 from diskcache import Cache  # type: ignore
 
@@ -20,6 +20,25 @@ class Listing:
     seller: str
     condition: str
     description: str
+    # Every photo in the listing's gallery, in page order, largest known
+    # variant per photo. `image` is kept as the primary and is always
+    # images[0] when the gallery is non-empty, so anything that only knows
+    # about `image` (notifications, the email template, older caches) keeps
+    # working unchanged. Defaulted because cached rows written before
+    # multi-photo support have no `images` key at all.
+    images: List[str] = field(default_factory=list)
+
+    @property
+    def photos(self: "Listing") -> List[str]:
+        """The gallery as the UI and the photo proxy index it.
+
+        Falls back to the single primary photo, so index 0 means the same
+        thing for a row cached last month and one cached today.
+        """
+        urls = [url for url in (self.images or []) if url]
+        if urls:
+            return urls
+        return [self.image] if self.image else []
 
     @property
     def content(self: "Listing") -> Tuple[str, str, str]:
@@ -29,11 +48,16 @@ class Listing:
     def hash(self: "Listing") -> str:
         # we need to normalize post_url before hashing because post_url will be different
         # each time from a search page. We also does not count image
+        #
+        # `images` is excluded for the same reason as `image`, and for a
+        # second one: the hash is the join key between a cached listing and
+        # its cached AI rating, so letting a newly extracted gallery into it
+        # would orphan every rating recorded before this field existed.
         return hash_dict(
             {
                 x: (y.split("?")[0] if x == "post_url" else y)
                 for x, y in asdict(self).items()
-                if x != "image"
+                if x not in ("image", "images")
             }
         )
 

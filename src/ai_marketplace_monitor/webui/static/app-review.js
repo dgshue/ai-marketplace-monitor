@@ -55,18 +55,47 @@
     const cls = MARKET_LABEL[m] ? m : "other";
     return `<span class="src ${cls}" title="${esc(marketLabel(m))}">${esc(String(m || "?")[0])}</span>`;
   };
-  const photoUrl = (row) => (row.image && row.url ? `/api/listing-image?post=${encodeURIComponent(row.url)}` : "");
+  // Photos are proxied, never hotlinked: Facebook's CDN URLs are signed and
+  // expire, so /api/listing-image serves the server-side snapshot. `i` picks
+  // the photo; omitting it means photo 0, which is what every caller that
+  // predates galleries asks for.
+  const photoUrl = (row, i) =>
+    row.url && (row.image || photoCount(row)) ? `/api/listing-image?post=${encodeURIComponent(row.url)}${i ? `&i=${i}` : ""}` : "";
+  // Facebook listing pages carry a gallery; every other source gives one tile
+  // photo, and so do Facebook listings cached before galleries were read.
+  const photoCount = (row) => Math.max(Number(row.image_count) || 0, row.image ? 1 : 0);
   const photoImg = (row, alt) =>
     photoUrl(row)
       ? `<img src="${esc(photoUrl(row))}" alt="${esc(alt || "listing photo")}" loading="lazy" onerror="this.remove()" />`
       : "";
-  // The detail hero. The score badge is positioned over the photo, so when
-  // there is no photo — none recorded, or the fetch 404s and onerror fires —
-  // the whole block goes and the inline badge in .badges carries the score.
-  const detailPhoto = (row) =>
-    photoUrl(row)
-      ? `<div class="ph"><img src="${esc(photoUrl(row))}" alt="${esc(row.title || "listing photo")}" onerror="this.parentElement.remove()" /><span class="sc ${scoreClass(row.score)}">${row.score} / 5</span>${srcGlyph(row.marketplace)}</div>`
+  // The detail hero: a scroll-snap carousel of every photo. The score badge
+  // is positioned over it, so when nothing loads — no photos recorded, or
+  // every fetch 404s because the CDN URLs expired — the whole block is
+  // removed and the inline badge in .badges carries the score.
+  //
+  // Only the slides near the start get a real `src` in the markup; the rest
+  // are filled in by syncGal as they come within LAZY_AHEAD of the photo on
+  // screen. Opening a detail costs three images, not twelve.
+  const LAZY_AHEAD = 2;
+  const detailPhoto = (row) => {
+    const n = photoCount(row);
+    if (!n || !row.url) return "";
+    const slides = Array.from({ length: n }, (_, i) => {
+      const url = esc(photoUrl(row, i));
+      const src = i < LAZY_AHEAD ? `src="${url}"` : `data-src="${url}"`;
+      const label = esc(row.title || "listing photo") + (n > 1 ? ` — photo ${i + 1} of ${n}` : "");
+      return `<div class="slide" data-slide="${i}"><img ${src} alt="${label}" loading="lazy" /></div>`;
+    }).join("");
+    const multi = n > 1;
+    const dots = multi
+      ? `<div class="dots">${Array.from({ length: n }, (_, i) => `<i class="${i ? "" : "on"}" data-dot="${i}" role="button" tabindex="-1" aria-label="Photo ${i + 1}"></i>`).join("")}</div>`
       : "";
+    const arrows = multi
+      ? `<button class="gnav prev" data-photo="-1" aria-label="Previous photo" title="Previous photo (,)">‹</button><button class="gnav next" data-photo="1" aria-label="Next photo" title="Next photo (.)">›</button>`
+      : "";
+    const counter = multi ? `<span class="pcount">1 / ${n}</span>` : "";
+    return `<div class="ph gal" data-count="${n}"><div class="track" role="group" aria-label="Listing photos">${slides}</div><span class="sc ${scoreClass(row.score)}">${row.score} / 5</span>${srcGlyph(row.marketplace)}${arrows}${dots}${counter}</div>`;
+  };
   const priceText = (row) => (row.price && row.price !== "**unspecified**" ? row.price : "—");
   const startOfToday = () => {
     const d = new Date();
@@ -551,6 +580,163 @@
         : "") + listHtml(R.mode);
   };
 
+
+  // ---------------------------------------------------------------
+  // Photo carousel + lightbox
+  //
+  // The track is a native horizontal scroll-snap container, so swiping on a
+  // phone is the browser's own gesture — no touch handler competing with the
+  // card swipe that keeps or dismisses the listing. Everything else (dots,
+  // arrows, keys) works by scrolling that same container, so there is one
+  // source of truth for "which photo is showing": its scroll position.
+  //
+  // Keys, stated once so they cannot collide with the review keys: ← and →
+  // always decide the listing (dismiss / keep). Photos move on , and . , or
+  // on Shift+← / Shift+→. Inside the lightbox, where there is no listing to
+  // decide, bare ← and → move photos too.
+  // ---------------------------------------------------------------
+  const galEl = () => $("#detail-pane .ph.gal");
+  const galTrack = () => $("#detail-pane .ph.gal .track");
+  const galIndex = () => {
+    const track = galTrack();
+    if (!track || !track.clientWidth) return 0;
+    return Math.round(track.scrollLeft / track.clientWidth);
+  };
+  const galLive = () => {
+    // Slides whose photo 404'd are dead weight: the CDN URL expired and there
+    // is nothing to show. They stay in the DOM (indexes must keep matching
+    // the proxy's `i`) but drop out of the dots and the count.
+    const gal = galEl();
+    return gal ? $$(".slide", gal).filter((s) => !s.classList.contains("dead")) : [];
+  };
+
+  // `forceIdx` is the photo a click or a keypress just asked for. A smooth
+  // scroll takes a few hundred ms to land, and dots that only follow the
+  // scroll position lag visibly behind the press; this lets them move at
+  // once, and the scroll listener re-syncs when the animation settles.
+  const syncGal = (forceIdx) => {
+    const gal = galEl();
+    if (!gal) return;
+    const idx = typeof forceIdx === "number" ? forceIdx : galIndex();
+    const slides = $$(".slide", gal);
+    // Fill in the slides now within reach. Two ahead is enough that a swipe
+    // never lands on a blank, and far short of loading the whole gallery.
+    slides.forEach((slide, i) => {
+      if (i > idx + LAZY_AHEAD) return;
+      const img = slide.querySelector("img[data-src]");
+      if (img) {
+        img.src = img.getAttribute("data-src");
+        img.removeAttribute("data-src");
+      }
+    });
+    const live = galLive();
+    $$(".dots i", gal).forEach((dot, i) => {
+      dot.classList.toggle("on", i === idx);
+      dot.classList.toggle("gone", slides[i] ? slides[i].classList.contains("dead") : false);
+    });
+    const counter = gal.querySelector(".pcount");
+    if (counter) counter.textContent = `${idx + 1} / ${slides.length}`;
+    const prev = gal.querySelector(".gnav.prev");
+    const next = gal.querySelector(".gnav.next");
+    if (prev) prev.disabled = idx <= 0;
+    if (next) next.disabled = idx >= slides.length - 1;
+    gal.classList.toggle("single", live.length < 2);
+    if (!live.length) gal.remove();
+    if (lightboxOpen()) syncLightbox();
+  };
+
+  const scrollGalTo = (idx) => {
+    const track = galTrack();
+    if (!track) return false;
+    const slides = $$(".slide", track);
+    const target = Math.max(0, Math.min(slides.length - 1, idx));
+    track.scrollTo({ left: target * track.clientWidth, behavior: "smooth" });
+    syncGal(target);
+    return true;
+  };
+  // Returns whether it did anything, so a keypress over a listing with one
+  // photo falls through instead of being swallowed.
+  const movePhoto = (delta) => {
+    const track = galTrack();
+    if (!track || $$(".slide", track).length < 2) return false;
+    const idx = galIndex();
+    const next = idx + delta;
+    if (next < 0 || next >= $$(".slide", track).length) return false;
+    scrollGalTo(next);
+    return true;
+  };
+
+  const bindGallery = () => {
+    const gal = galEl();
+    if (!gal) return;
+    const track = galTrack();
+    let raf = null;
+    track.addEventListener("scroll", () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = null;
+        syncGal();
+      });
+    });
+    $$("img", gal).forEach((img) => {
+      img.addEventListener("error", () => {
+        const slide = img.closest(".slide");
+        if (slide) slide.classList.add("dead");
+        img.remove();
+        syncGal();
+      });
+    });
+    gal.querySelectorAll("[data-photo]").forEach((btn) =>
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        movePhoto(Number(btn.dataset.photo));
+      })
+    );
+    gal.querySelectorAll("[data-dot]").forEach((dot) =>
+      dot.addEventListener("click", (e) => {
+        e.stopPropagation();
+        scrollGalTo(Number(dot.dataset.dot));
+      })
+    );
+    $$(".slide", gal).forEach((slide) =>
+      slide.addEventListener("click", () => {
+        if (!slide.classList.contains("dead")) openLightbox();
+      })
+    );
+    syncGal();
+  };
+
+  // The lightbox is deliberately plain: the same photo, as big as the screen
+  // allows, on a black backdrop. No pinch-zoom handling and no pan — a
+  // Marketplace photo is 960px wide, so there is nothing to zoom into, and a
+  // custom gesture layer here would fight the browser's own.
+  const lightbox = () => $("#lightbox");
+  const lightboxOpen = () => !!lightbox() && !lightbox().classList.contains("hidden");
+  const syncLightbox = () => {
+    const gal = galEl();
+    const box = lightbox();
+    if (!gal || !box) return;
+    const idx = galIndex();
+    const slides = $$(".slide", gal);
+    const src = slides[idx] && slides[idx].querySelector("img");
+    const img = $("#lightbox-img");
+    if (src && img) {
+      img.src = src.currentSrc || src.src;
+      img.alt = src.alt || "";
+    }
+    $("#lightbox-count").textContent = slides.length > 1 ? `${idx + 1} / ${slides.length}` : "";
+  };
+  const openLightbox = () => {
+    if (!galEl() || !lightbox()) return;
+    lightbox().classList.remove("hidden");
+    syncLightbox();
+  };
+  const closeLightbox = () => lightbox() && lightbox().classList.add("hidden");
+  if (lightbox()) {
+    $("#lightbox-backdrop").addEventListener("click", closeLightbox);
+    $("#lightbox-close").addEventListener("click", closeLightbox);
+  }
+
   // ---- detail ----
   let dealMap = null;
   const detailHtml = (row, pos, total) => {
@@ -616,6 +802,8 @@
       }
       dealMap = null;
     }
+    // A carousel that is being replaced cannot keep a lightbox open over it.
+    closeLightbox();
     if (!show) {
       if (desktop && R.mode !== "queue") {
         // The rail is the list; say so instead of leaving the centre blank.
@@ -635,6 +823,7 @@
     const body = pane.querySelector(".dbody");
     if (body) body.scrollTop = 0;
     if (!desktop) window.scrollTo(0, 0);
+    bindGallery();
     mountMap(row);
   };
 
@@ -1041,12 +1230,30 @@
 
   // Desktop keyboard flow. Ignored while typing or with a modal open.
   document.addEventListener("keydown", (e) => {
-    if (state.view !== "review" || modalOpen() || typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    // The lightbox is its own little mode: there is no listing to decide on
+    // while a photo fills the screen, so the arrows move photos there.
+    if (lightboxOpen()) {
+      if (e.key === "Escape") closeLightbox();
+      else if (e.key === "ArrowRight" || e.key === "." || e.key === ">") movePhoto(1);
+      else if (e.key === "ArrowLeft" || e.key === "," || e.key === "<") movePhoto(-1);
+      else return;
+      e.preventDefault();
+      return;
+    }
+    if (state.view !== "review" || modalOpen()) return;
     const row = current();
     const key = e.key;
     const top = $("#stack .tcard.top");
     const handled = () => e.preventDefault();
-    if (key === "j" || key === "J") {
+    // Photos before decisions: , and . (and Shift+arrows for anyone who
+    // reaches for the arrows) never reach the keep/dismiss branches below,
+    // and bare arrows never reach these.
+    if (key === "," || key === "<" || (key === "ArrowLeft" && e.shiftKey)) {
+      if (movePhoto(-1)) handled();
+    } else if (key === "." || key === ">" || (key === "ArrowRight" && e.shiftKey)) {
+      if (movePhoto(1)) handled();
+    } else if (key === "j" || key === "J") {
       move(1);
       handled();
     } else if (key === "k" || key === "K") {
@@ -1115,5 +1322,8 @@
     allRows,
     review: R,
     swipe: { SWIPE_FRACTION, FLING_VELOCITY, LOCK_PX },
+    photoCount,
+    photoUrl,
+    gallery: { index: galIndex, move: movePhoto, to: scrollGalTo, open: openLightbox, close: closeLightbox, isOpen: lightboxOpen },
   });
 })();

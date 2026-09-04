@@ -300,6 +300,27 @@ collecting the merely interesting for later:
 Note that all listings after non-AI-based filtering will be returned if no AI service is specified
 or non-functional.
 
+Listing Photos
+--------------
+
+Facebook listing pages carry a gallery, and *AI Marketplace Monitor* reads all of it while it is
+already on the page -- no extra page loads, no clicking through the carousel. The web UI's detail
+view shows the photos as a swipeable carousel; ``,`` and ``.`` (or ``Shift`` + the arrow keys) move
+between them, and the plain arrow keys keep their meaning of keep and dismiss.
+
+Because Facebook's image links are signed and expire within days, the photos of any listing that
+reaches the review threshold are copied to disk in the background, so they still display long after
+the original links are dead. ``max_images`` controls how many are kept:
+
+.. code-block:: toml
+
+    [marketplace.facebook]
+    max_images = 6      # the default; 12 is the maximum, 0 keeps none
+
+It may be set on a ``marketplace`` section and overridden on any ``item``. eBay, Depop and Poshmark
+are read from search result tiles, which carry a single photo each and whose listing pages are never
+visited, so listings from those sources show one photo regardless of this setting.
+
 Advanced Keyword-Based Filters
 ==============================
 

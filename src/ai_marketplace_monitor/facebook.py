@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 import re
 import time
@@ -6,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import repeat
 from logging import Logger
-from typing import Any, ClassVar, Generator, List, Tuple, Type, cast
+from typing import Any, ClassVar, Dict, Generator, List, Tuple, Type, cast
 from urllib.parse import quote
 
 import humanize
@@ -167,6 +168,212 @@ def detect_block_signal(
         if sign in body_l:
             return f'page text "{sign}"'
     return None
+
+
+# ---------------------------------------------------------------------------
+# Listing photos.
+#
+# Facebook serves every image on a Marketplace page from the same CDN, so
+# "the first <img> on the page" is as likely to be the signed-in account's own
+# avatar as the item. That is not hypothetical: of 204 listings cached by this
+# deployment before this code existed, 49 had the account avatar as their
+# photo and 24 had an .mp4 -- 36% of the queue showed a person or nothing.
+#
+# The discriminator is the CDN path. A scontent URL is
+#   https://scontent-<pop>.xx.fbcdn.net/v/<type>/<id1>_<id2>_<id3>_n.jpg?stp=...
+# where <type> names the media class and the number after its dash is the
+# subtype. Subtype -1 is the profile picture (t39.30808-1, t1.6435-1);
+# listing photos come back as t39.30808-6, t39.84726-6 or the Marketplace
+# type t45.5328-4 -- all confirmed against the cache above. Videos are served
+# from video-*.fbcdn.net instead of scontent-*, so a host test excludes them.
+#
+# The same photo is served in many sizes under one filename, with the
+# requested transform in `stp` / `ctp` / `cstp` (dst-jpg_s960x960_tt6,
+# cp6_dst-jpg_s100x100_tt6, mx1536x2048). The filename stem is therefore the
+# identity of a photo and the size hint picks the best variant of it.
+#
+# Sources for the extraction strategy below (surveyed before writing it):
+#   * ethanashi/fbm-sniper-community, lib/fb-scraper.js (getListingDetail):
+#     scopes to the inline `"listing_photos":[ ... ]` JSON array and pulls
+#     `"uri"` out of it, explicitly because "the full page has 30+ unrelated
+#     scontent URLs (ads, thumbnails, profile pics)", and skips og:image as a
+#     scaled duplicate of listing_photos[0]. This is where get_images() looks
+#     first, and it is the only source that yields photos Facebook has not
+#     rendered yet.
+#   * adbertram/cli-tools, facebook/facebook_cli/client.py
+#     (DETAIL_PAGE_IMAGES_JS): the DOM fallback. Facebook tags the hero photo
+#     and every gallery thumbnail alt="Product photo of <title>" (captured
+#     live 2026-07-25); sidebar ad creatives and the recommended-listing grid
+#     carry different alt text, and their tiles sit inside
+#     a[href*="/marketplace/item/"], which that scraper excludes. Both rules
+#     are reproduced here.
+#   * scrapfly/scrapfly-scrapers, facebook-scraper/facebook.py: confirms
+#     `primary_listing_photo.image.uri` is the search-tile cover photo only,
+#     which is why the tile can never supply a gallery.
+#   * kevinzg/facebook-scraper, facebook_scraper/extractors.py: the general
+#     "listing JSON lives inline in a <script> tag" technique.
+# The `<id>_<id>_<id>_n` filename stem as the identity of a photo across size
+# variants is confirmed by a captured Marketplace GraphQL payload
+# (swipswaps/fb-profile-processor, listing_context_debug.txt) and by the fact
+# that only stp/_nc_*/oh/oe differ between renditions.
+_PHOTO_HOST_HINT = "scontent"
+_PROFILE_PICTURE_SUBTYPE = "-1"
+_NON_PHOTO_EXTENSIONS = (".mp4", ".webm", ".m3u8", ".svg", ".gif")
+# Avatars and UI glyphs are requested at 100x100 or smaller (every profile
+# picture in this deployment's cache came back `_s100x100_`), while the
+# smallest real listing photo observed is a 135x135 search tile. The cut sits
+# between the two: this is a backstop for icons, not the main defence -- the
+# profile subtype above is what actually identifies an avatar.
+MIN_PHOTO_PIXELS = 120
+# Enough to fill a carousel without turning one listing into a photo album.
+MAX_PHOTOS = 12
+# How far above and below the main photo a thumbnail may sit and still be
+# part of this listing's gallery. Wide enough for a stacked strip on a
+# phone layout, far short of the "Similar listings" grid further down.
+GALLERY_BAND_PX = 400
+# The alt text Facebook puts on the hero photo and every gallery
+# thumbnail: "Product photo of <listing title>". Translatable, like every
+# other English landmark this scraper keys on.
+PRODUCT_PHOTO_ALT = "Product photo of"
+
+
+def _photo_size_hint(url: str) -> int:
+    """Largest dimension the CDN transform parameters ask for, 0 if unknown."""
+    best = 0
+    for value in re.findall(r"[?&](?:stp|ctp|cstp)=([^&]*)", url):
+        for width, height in re.findall(r"(\d{2,4})x(\d{2,4})", value):
+            best = max(best, int(width), int(height))
+    return best
+
+
+def _photo_identity(url: str) -> str:
+    """Filename stem, which is stable across every size variant of one photo."""
+    return url.split("?")[0].rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+
+
+def is_listing_photo(url: str) -> bool:
+    """True when a Facebook image URL is one of the listing's own photos.
+
+    Rejects profile pictures, video sources and anything the CDN was asked to
+    render at avatar size. Non-Facebook URLs are accepted as-is: other
+    marketplaces reuse this only through Listing, never through this filter.
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    host = url.split("/")[2].lower()
+    path = url.split("?")[0].lower()
+    if path.endswith(_NON_PHOTO_EXTENSIONS):
+        return False
+    if "fbcdn.net" in host or "facebook.com" in host:
+        if _PHOTO_HOST_HINT not in host:
+            # video-*.fbcdn.net, static.xx.fbcdn.net (UI sprites), and the
+            # www.facebook.com/rsrc.php icons all land here.
+            return False
+        match = re.search(r"/v/([^/]+)/", url)
+        if match and match.group(1).endswith(_PROFILE_PICTURE_SUBTYPE):
+            return False
+    hint = _photo_size_hint(url)
+    return not (hint and hint < MIN_PHOTO_PIXELS)
+
+
+def select_listing_photos(candidates: List[Dict[str, Any]], limit: int = MAX_PHOTOS) -> List[str]:
+    """Order, filter and de-duplicate scraped <img> candidates into a gallery.
+
+    Each candidate is {"src", "width", "profile"} as collected in the page.
+    Page order is preserved -- the main photo renders before its thumbnail
+    strip -- and each photo appears once, at the largest variant seen for it.
+    """
+    order: List[str] = []
+    best: Dict[str, Tuple[int, str]] = {}
+    for candidate in candidates:
+        src = str((candidate or {}).get("src") or "")
+        if candidate.get("profile") or not is_listing_photo(src):
+            continue
+        width = int(candidate.get("width") or 0)
+        # A rendered image small in both its URL hint and its intrinsic size
+        # is a glyph, not a photo. An unknown intrinsic size (lazy slide not
+        # decoded yet) is not evidence of anything, so it passes.
+        if width and width < MIN_PHOTO_PIXELS and _photo_size_hint(src) < MIN_PHOTO_PIXELS:
+            continue
+        identity = _photo_identity(src)
+        rank = max(_photo_size_hint(src), width)
+        if identity not in best:
+            order.append(identity)
+            best[identity] = (rank, src)
+        elif rank > best[identity][0]:
+            best[identity] = (rank, src)
+    return [best[identity][1] for identity in order[:limit]]
+
+
+# Collected in one round-trip per element rather than one per <img>: a search
+# page holds two dozen tiles and a listing page a dozen images, and an
+# ElementHandle call each would double the time on a page the pacing budget
+# already pays dearly for.
+#
+# `other` marks images inside a link to a *different* listing -- the
+# "Similar listings" / "More from this seller" grids. On a search page every
+# tile is such a link, so only the listing-page path may act on that flag.
+_COLLECT_IMAGES_JS = """
+(el) => Array.from((el && el.querySelectorAll ? el : document).querySelectorAll('img')).map((im) => {
+  const r = im.getBoundingClientRect();
+  return {
+    src: im.currentSrc || im.src || '',
+    alt: im.alt || '',
+    width: im.naturalWidth || 0,
+    top: r.top,
+    bottom: r.bottom,
+    area: r.width * r.height,
+    other: !!im.closest('a[href*="/marketplace/item/"]'),
+    profile: !!im.closest('a[href*="/marketplace/profile"], a[href*="/profile.php"], a[href*="/groups/"], [aria-label*="rofile"]'),
+  };
+})
+"""
+
+# Reads the photo array straight out of the page's inline listing JSON, which
+# is both complete (every photo, not only the rendered ones) and full-size.
+# Bracket-matched to that one array: the rest of the page holds thirty-odd
+# unrelated CDN URLs, and a document-wide regex would sweep them all in.
+#
+# The FIRST array that yields anything wins and the scan stops there. The
+# page's own listing is the payload it was rendered for; anything further
+# down belongs to the recommendation rails.
+_LISTING_PHOTOS_JS = r"""
+() => {
+  const key = '"listing_photos":[';
+  for (const node of document.querySelectorAll('script')) {
+    const text = node.textContent || '';
+    let at = text.indexOf(key);
+    while (at !== -1) {
+      const start = text.indexOf('[', at);
+      let depth = 0, end = start;
+      for (; end < text.length && end - start < 200000; end++) {
+        const ch = text[end];
+        if (ch === '[') depth++;
+        else if (ch === ']') { depth--; if (depth === 0) break; }
+      }
+      const slice = text.slice(start, end + 1);
+      const re = /"uri"\s*:\s*"([^"]+)"/g;
+      const out = [];
+      let m;
+      while ((m = re.exec(slice)) !== null && out.length < 40) out.push(m[1]);
+      if (out.length) return out;
+      at = text.indexOf(key, end + 1);
+    }
+  }
+  return [];
+}
+"""
+
+
+# Facebook writes JSON into <script> with the slashes escaped; nothing else in
+# a CDN URL needs decoding.
+def _unescape_json_uri(uri: str) -> str:
+    try:
+        return json.loads(f'"{uri}"')
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return uri.replace(r"\/", "/")
 
 
 @dataclass
@@ -700,6 +907,7 @@ class FacebookMarketplace(Marketplace):
                             price=listing.price,
                             title=listing.title,
                             location=listing.location,
+                            image=listing.image,
                         )
                         if not from_cache:
                             self.pace(item_config, reason="after a listing page")
@@ -716,6 +924,11 @@ class FacebookMarketplace(Marketplace):
                     for attr in ("condition", "seller", "description"):
                         # other attributes should be consistent
                         setattr(listing, attr, getattr(details, attr))
+                    # Photos are the one thing the tile cannot know: it has a
+                    # single thumbnail, the detail page has the gallery.
+                    if details.images:
+                        listing.images = details.images
+                        listing.image = details.images[0]
                     listing.name = item_config.name
                     if self.logger:
                         self.logger.debug(
@@ -780,6 +993,22 @@ class FacebookMarketplace(Marketplace):
         """
         return tile_value if tile_value else self._prefer_tile(pdp_value, None)
 
+    def _merge_images(
+        self: "FacebookMarketplace", pdp_images: List[str], tile_image: str | None
+    ) -> List[str]:
+        """The listing page's gallery, else whatever the search tile had.
+
+        The detail page is the only place the other photos exist, so it wins
+        outright. The tile is the fallback for the layouts whose gallery is
+        rendered behind a click -- and it is a fallback, not a supplement:
+        mixing a tile thumbnail into a gallery just duplicates photo one at a
+        worse resolution.
+        """
+        gallery = select_listing_photos([{"src": url} for url in pdp_images])
+        if gallery:
+            return gallery
+        return [tile_image] if tile_image and is_listing_photo(tile_image) else []
+
     def get_listing_details(
         self: "FacebookMarketplace",
         post_url: str,
@@ -787,6 +1016,7 @@ class FacebookMarketplace(Marketplace):
         price: str | None = None,
         title: str | None = None,
         location: str | None = None,
+        image: str | None = None,
     ) -> Tuple[Listing, bool]:
         assert post_url.startswith("https://www.facebook.com")
         details = Listing.from_cache(post_url)
@@ -821,6 +1051,10 @@ class FacebookMarketplace(Marketplace):
         details.location = self._prefer_tile(details.location, location)
         details.seller = self._prefer_tile(details.seller, None)
         details.condition = self._prefer_tile(details.condition, None)
+        details.images = self._merge_images(details.images, image)
+        # `image` is defined as the gallery's first entry, so an empty gallery
+        # means no photo -- never the stale avatar an older scrape left behind.
+        details.image = details.images[0] if details.images else ""
         details.to_cache(post_url)
         return details, False
 
@@ -991,8 +1225,25 @@ class FacebookSearchResultPage(WebPage):
                 location = "" if len(divs) < 3 else (divs[2].text_content() or "")
 
                 # get image
-                img = listing.query_selector("img")
-                image = img.get_attribute("src") if img else ""
+                #
+                # Not `query_selector("img")`: the first <img> in a tile is
+                # the seller's avatar whenever Facebook decorates the tile
+                # with one ("your friend is selling", most dealer vehicle
+                # tiles), and a profile picture where the item should be is
+                # worse than no picture at all. Take the best real photo in
+                # the tile instead, or nothing.
+                image = ""
+                try:
+                    image = (
+                        select_listing_photos(listing.evaluate(_COLLECT_IMAGES_JS), limit=1)
+                        or [""]
+                    )[0]
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    img = listing.query_selector("img")
+                    candidate = (img.get_attribute("src") if img else "") or ""
+                    image = candidate if is_listing_photo(candidate) else ""
                 price = extract_price(raw_price)
 
                 if post_url.startswith("/"):
@@ -1040,8 +1291,84 @@ class FacebookItemPage(WebPage):
     def get_price(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_price is not implemented for this page")
 
+    def _images_from_json(self: "FacebookItemPage") -> List[str]:
+        """Photos from the page's own inline listing JSON.
+
+        The best source there is: complete (Facebook ships the whole array
+        whether or not the carousel has rendered past photo two) and
+        full-size. Bracket-matched to the `listing_photos` array so the
+        thirty-odd unrelated CDN URLs elsewhere on the page cannot leak in.
+        """
+        try:
+            raw = self.page.evaluate(_LISTING_PHOTOS_JS)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"{hilight('[Retrieve]', 'fail')} listing_photos: {e}")
+            return []
+        return [_unescape_json_uri(str(uri)) for uri in (raw or [])]
+
+    def _images_from_dom(self: "FacebookItemPage") -> List[Dict[str, Any]]:
+        """Rendered gallery images, as candidate dicts.
+
+        Two passes. Facebook labels the hero photo and each gallery thumbnail
+        alt="Product photo of <title>" while advertisement creatives and the
+        recommended-listing grid do not, so that alt prefix is the precise
+        scope. It is English, though, and this scraper also runs against
+        translated locales -- so when the alt yields nothing, fall back to
+        position: the gallery is the largest image on the page plus whatever
+        sits within a band of it, and "Similar listings" is far below.
+        """
+        try:
+            candidates = self.page.evaluate(_COLLECT_IMAGES_JS, None)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"{hilight('[Retrieve]', 'fail')} get_images: {e}")
+            return []
+        usable = [
+            c
+            for c in candidates
+            if not c.get("profile")
+            and not c.get("other")
+            and is_listing_photo(str(c.get("src") or ""))
+        ]
+        if not usable:
+            return []
+        prefix = self.translator(PRODUCT_PHOTO_ALT).lower()
+        tagged = [c for c in usable if str(c.get("alt") or "").lower().startswith(prefix)]
+        if tagged:
+            return tagged
+        main = max(usable, key=lambda c: float(c.get("area") or 0))
+        top = float(main.get("top") or 0) - GALLERY_BAND_PX
+        bottom = float(main.get("bottom") or 0) + GALLERY_BAND_PX
+        return [
+            c
+            for c in usable
+            if float(c.get("bottom") or 0) >= top and float(c.get("top") or 0) <= bottom
+        ] or [main]
+
+    def get_images(self: "FacebookItemPage") -> List[str]:
+        """Every photo in the listing's gallery, in page order.
+
+        No extra page load and no clicking through the carousel: the photos
+        are already in the page, in its inline JSON and in the thumbnail
+        strip beneath the hero image. Nothing here is anything Facebook can
+        read as automation.
+
+        The inline JSON wins when it is there; the rendered DOM is the
+        fallback for the day Facebook renames that key.
+        """
+        photos = select_listing_photos([{"src": url} for url in self._images_from_json()])
+        if photos:
+            return photos
+        return select_listing_photos(self._images_from_dom())
+
     def get_image_url(self: "FacebookItemPage") -> str:
-        raise NotImplementedError("get_image_url is not implemented for this page")
+        """The primary photo: the first entry of the gallery, or nothing."""
+        return (self.get_images() or [""])[0]
 
     def get_seller(self: "FacebookItemPage") -> str:
         raise NotImplementedError("get_seller is not implemented for this page")
@@ -1093,12 +1420,14 @@ class FacebookItemPage(WebPage):
 
         if self.logger:
             self.logger.info(f"{hilight('[Retrieve]', 'succ')} Parsing {hilight(title)}")
+        images = self.get_images()
         res = Listing(
             marketplace="facebook",
             name="",
             id=post_url.split("?")[0].rstrip("/").split("/")[-1],
             title=title,
-            image=self.get_image_url(),
+            image=images[0] if images else "",
+            images=images,
             price=extract_price(price),
             post_url=post_url,
             location=self.get_location(),
@@ -1133,17 +1462,6 @@ class FacebookRegularItemPage(FacebookItemPage):
         try:
             price_element = self.page.locator("h1 + *")
             return price_element.text_content() or self.translator("**unspecified**")
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(f"{hilight('[Retrieve]', 'fail')} {e}")
-            return ""
-
-    def get_image_url(self: "FacebookRegularItemPage") -> str:
-        try:
-            image_url = self.page.locator("img").first.get_attribute("src") or ""
-            return image_url
         except KeyboardInterrupt:
             raise
         except Exception as e:

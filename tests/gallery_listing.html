@@ -1,0 +1,76 @@
+<!doctype html>
+<!--
+  A minimal stand-in for a Facebook Marketplace listing page, reduced to the
+  parts get_images() reads: the inline `listing_photos` JSON, the hero photo
+  and its thumbnail strip, and the things that must NOT be mistaken for the
+  listing's own photos -- the account avatar in the page chrome, the seller's
+  profile picture, a video source, a UI sprite, and the "Similar listings"
+  grid whose tiles link to other items.
+
+  URL shapes are taken verbatim from real cached listings (photo types
+  t39.30808-6 / t39.84726-6 / t45.5328-4, profile subtype t39.30808-1,
+  video-*.fbcdn.net for videos, and the stp/ctp size hints).
+-->
+<html>
+  <head>
+    <title>Marketplace - 2009 Toyota Avalon Limited</title>
+    <script type="application/json" data-content-len="0">
+      {"marketplace_listing_title":"2009 Toyota Avalon Limited","listing_photos":[{"__typename":"Photo","id":"1","image":{"uri":"https:\/\/scontent-atl3-2.xx.fbcdn.net\/v\/t39.30808-6\/764638222_122327286884029173_9122952715198746806_n.jpg?stp=dst-jpg_p960x960_tt6&_nc_cat=105&oe=6900"}},{"__typename":"Photo","id":"2","image":{"uri":"https:\/\/scontent-atl3-2.xx.fbcdn.net\/v\/t39.30808-6\/764638333_122327286884029174_9122952715198746807_n.jpg?stp=dst-jpg_p960x960_tt6&_nc_cat=105&oe=6900"}},{"__typename":"Photo","id":"3","image":{"uri":"https:\/\/scontent-atl3-3.xx.fbcdn.net\/v\/t45.5328-4\/758245863_1724149762205409_937498582279949920_n.jpg?stp=dst-jpg_p720x720_tt6&_nc_cat=108&oe=6900"}}],"primary_listing_photo":{"__typename":"Photo","image":{"uri":"https:\/\/scontent-atl3-2.xx.fbcdn.net\/v\/t39.30808-6\/764638222_122327286884029173_9122952715198746806_n.jpg?stp=cp6_dst-jpg_s135x135_tt6&_nc_cat=105"}}}
+    </script>
+  </head>
+  <body>
+    <div role="banner">
+      <!-- The signed-in account's own avatar. This is the image the old
+           "first <img> on the page" rule picked up on 49 of 204 listings. -->
+      <img src="https://scontent-atl3-3.xx.fbcdn.net/v/t39.30808-1/742338820_27736835159259460_3023661446999844781_n.jpg?stp=cp6_dst-jpg_s100x100_tt6&_nc_cat=110" alt="Your profile" />
+      <img src="https://static.xx.fbcdn.net/rsrc.php/v3/yq/r/icon.png" alt="" />
+    </div>
+    <div role="main">
+      <div class="gallery">
+        <img
+          alt="Product photo of 2009 Toyota Avalon Limited"
+          src="https://scontent-atl3-2.xx.fbcdn.net/v/t39.30808-6/764638222_122327286884029173_9122952715198746806_n.jpg?stp=dst-jpg_p960x960_tt6&_nc_cat=105&oe=6900"
+        />
+        <div class="thumbs">
+          <!-- Same three photos at thumbnail size: same filename stems, so
+               they must collapse into the entries above rather than double
+               the gallery. -->
+          <img
+            alt="Product photo of 2009 Toyota Avalon Limited"
+            src="https://scontent-atl3-2.xx.fbcdn.net/v/t39.30808-6/764638222_122327286884029173_9122952715198746806_n.jpg?stp=cp6_dst-jpg_s135x135_tt6&_nc_cat=105"
+          />
+          <img
+            alt="Product photo of 2009 Toyota Avalon Limited"
+            src="https://scontent-atl3-2.xx.fbcdn.net/v/t39.30808-6/764638333_122327286884029174_9122952715198746807_n.jpg?stp=cp6_dst-jpg_s135x135_tt6&_nc_cat=105"
+          />
+          <img
+            alt="Product photo of 2009 Toyota Avalon Limited"
+            src="https://scontent-atl3-3.xx.fbcdn.net/v/t45.5328-4/758245863_1724149762205409_937498582279949920_n.jpg?stp=cp6_dst-jpg_s135x135_tt6&_nc_cat=108"
+          />
+          <!-- A video in the same strip: not an image the proxy can serve. -->
+          <img
+            alt="Product photo of 2009 Toyota Avalon Limited"
+            src="https://video-atl3-3.xx.fbcdn.net/o1/v/t2/f2/m266/AQPbfvrKt3DJDqaaSMcAv77INBonkzGVqyDjoMOH8Ccj.mp4?strext=1&_nc_cat=108"
+          />
+        </div>
+      </div>
+      <h1>2009 Toyota Avalon Limited</h1>
+      <span>$8,995</span>
+      <a href="/marketplace/profile/100001234567890/">
+        <img src="https://scontent-atl3-3.xx.fbcdn.net/v/t39.30808-1/999338820_27736835159259999_3023661446999844999_n.jpg?stp=cp6_dst-jpg_s60x60_tt6" alt="Austin Ewing" />
+        <span>Austin Ewing</span>
+      </a>
+      <ul><li>Condition</li><li>Used - good</li></ul>
+      <div>Runs great, clean title.</div>
+      <h2>Similar listings</h2>
+      <div class="similar">
+        <a href="/marketplace/item/555000111222333/">
+          <img src="https://scontent-atl3-1.xx.fbcdn.net/v/t45.5328-4/111222333_1724149762205111_937498582279949111_n.jpg?stp=dst-jpg_p960x960_tt6" alt="2011 Honda Accord" />
+        </a>
+        <a href="/marketplace/item/555000111222444/">
+          <img src="https://scontent-atl3-1.xx.fbcdn.net/v/t45.5328-4/444555666_1724149762205444_937498582279949444_n.jpg?stp=dst-jpg_p960x960_tt6" alt="2006 Toyota Camry" />
+        </a>
+      </div>
+    </div>
+  </body>
+</html>

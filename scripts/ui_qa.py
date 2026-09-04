@@ -17,6 +17,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from playwright.sync_api import sync_playwright
 
@@ -239,12 +240,14 @@ def overlap(a, b):
 
 # Anything the browser will let scroll sideways must have asked for it: a rail
 # or pane that scrolls horizontally is always a layout bug, and only the opt-in
-# strips (chip rows, the log table, CodeMirror) may exceed their own width.
+# strips (chip rows, the photo carousel's snap track, the log table,
+# CodeMirror) may exceed their own width.
 SIDEWAYS = """() => Array.from(document.querySelectorAll('body *')).filter(el => {
   const s = getComputedStyle(el);
   if (!['auto', 'scroll'].includes(s.overflowX)) return false;
   if (el.scrollWidth <= el.clientWidth + 1) return false;
-  return !el.classList.contains('chips') && !el.closest('.CodeMirror') && !el.closest('.logs');
+  return !el.classList.contains('chips') && !el.classList.contains('track')
+    && !el.closest('.CodeMirror') && !el.closest('.logs');
 }).map(el => (el.id || el.tagName) + '.' + (el.className || '').toString().slice(0, 30)
   + ' ' + el.scrollWidth + '>' + el.clientWidth)"""
 
@@ -327,11 +330,55 @@ _probe_item = next((name for name in sorted(_qa_notify) if name not in _qa_disab
 _PROBE_REVIEW = _qa_review.get(_probe_item, 3) if _probe_item else 3
 LOW_ID = "qa-tier-low"
 OK_ID = "qa-tier-ok"
+# A listing with a real gallery. The live cache may hold none -- galleries are
+# only read on listing pages fetched since the feature shipped -- and "does the
+# carousel render every photo" is not a check worth leaving to chance.
+GALLERY_ID = "qa-gallery"
+GALLERY_N = 5
+GALLERY_URL = f"https://qa.invalid/item/{GALLERY_ID}"
 _probe_keys = []
+_probe_files = []
 
 
-def _seed_probe(listing_id, score):
+def _seed_snapshots(post_url, count):
+    """Write the photo snapshots the proxy would otherwise have to fetch.
+
+    The probe's CDN URLs are invented, so nothing can download them; writing
+    the snapshots is what makes the carousel show real, distinguishable
+    images. Each is a different flat colour so a screenshot shows which photo
+    is on screen.
+    """
+    from PIL import Image, ImageDraw
+
+    from ai_marketplace_monitor.utils import image_cache_path
+
+    palette = ["#3b6cf6", "#f6a23b", "#3bf68a", "#f63b6c", "#8a3bf6", "#3bf6f6"]
+    for index in range(count):
+        path = image_cache_path(post_url, index)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (640, 480), palette[index % len(palette)])
+        ImageDraw.Draw(img).text((36, 36), f"QA PHOTO {index + 1}", fill="#0e1117")
+        img.save(path, format="JPEG")
+        _probe_files.append(path)
+
+
+# Long enough that the detail pane genuinely scrolls. The size sweep opens
+# whatever card is first in the queue, which the gallery probe now is, and
+# "scrolling the detail moves it" needs content taller than the pane.
+PROBE_COMMENT = (
+    "tier probe. "
+    + (
+        "This listing is priced well below comparable ones nearby, the description "
+        "is specific about condition and history, and the photos show the item from "
+        "several angles rather than one flattering crop. "
+    )
+    * 8
+)
+
+
+def _seed_probe(listing_id, score, images=None, comment="tier probe"):
     url = f"https://qa.invalid/item/{listing_id}"
+    images = images or []
     _cache.set(
         (_CT.LISTING_DETAILS.value, url),
         {
@@ -339,7 +386,8 @@ def _seed_probe(listing_id, score):
             "name": "",
             "id": listing_id,
             "title": f"QA tier probe scoring {score}",
-            "image": "",
+            "image": images[0] if images else "",
+            "images": images,
             "price": "$1",
             "post_url": url,
             "location": "",
@@ -351,7 +399,7 @@ def _seed_probe(listing_id, score):
     )
     _cache.set(
         (_CT.AI_BY_LISTING.value, "facebook", listing_id, _probe_item),
-        {"score": score, "comment": "tier probe", "name": "qa", "rated_at": time.time()},
+        {"score": score, "comment": comment, "name": "qa", "rated_at": time.time()},
         tag=_CT.AI_BY_LISTING.value,
     )
     _probe_keys.append((_CT.LISTING_DETAILS.value, url))
@@ -361,6 +409,45 @@ def _seed_probe(listing_id, score):
 if _probe_item and _PROBE_REVIEW > 1:
     _seed_probe(LOW_ID, _PROBE_REVIEW - 1)
     _seed_probe(OK_ID, _PROBE_REVIEW)
+GALLERY_KEY = f"facebook:{GALLERY_ID}" if _probe_item else None
+if _probe_item:
+    # Score 5 so it sorts to the top of the queue and the carousel is what a
+    # screenshot of the detail actually shows.
+    _seed_probe(
+        GALLERY_ID,
+        5,
+        [
+            f"https://scontent-atl3-2.xx.fbcdn.net/v/t39.30808-6/{n}_2_3_n.jpg?stp=dst-jpg_p960x960_tt6"
+            for n in range(GALLERY_N)
+        ],
+        comment=PROBE_COMMENT,
+    )
+    _seed_snapshots(GALLERY_URL, GALLERY_N)
+
+
+def carousel_state(pg):
+    """Everything the carousel asserts on, read from the live DOM."""
+    return js(
+        pg,
+        """() => {
+          const gal = document.querySelector('#detail-pane .ph.gal');
+          if (!gal) return null;
+          const track = gal.querySelector('.track');
+          const dots = Array.from(gal.querySelectorAll('.dots i'));
+          return {
+            slides: gal.querySelectorAll('.slide').length,
+            dead: gal.querySelectorAll('.slide.dead').length,
+            dots: dots.length,
+            active: dots.findIndex(d => d.classList.contains('on')),
+            index: window.__aimm.gallery.index(),
+            counter: (gal.querySelector('.pcount') || {}).textContent || '',
+            arrows: gal.querySelectorAll('.gnav').length,
+            loaded: Array.from(gal.querySelectorAll('.slide img')).filter(i => !i.dataset.src).length,
+            trackScrolls: track.scrollWidth > track.clientWidth + 1,
+          };
+        }""",
+    )
+
 
 msgs = []
 with sync_playwright() as p:
@@ -1049,6 +1136,195 @@ with sync_playwright() as p:
         pg.screenshot(path="/tmp/qa/detail-desktop.png", full_page=True)
     else:
         check("media checks (no facebook rows with coords)", True, "skipped")
+
+    # ---------- detail carousel: every photo, one at a time ----------
+    if GALLERY_KEY:
+        _grow = api_row(pg, GALLERY_KEY)
+        check(
+            "activity row carries the whole gallery",
+            _grow and _grow["image_count"] == GALLERY_N and len(_grow["images"]) == GALLERY_N,
+            _grow and (_grow["image_count"], len(_grow["images"])),
+        )
+        # The proxy indexes into that gallery; past its end is a clean 404,
+        # not a 500 and not photo 0 served again.
+        _codes = [
+            pg.request.get(
+                BASE + "/api/listing-image?post=" + quote(GALLERY_URL) + f"&i={i}"
+            ).status
+            for i in range(GALLERY_N + 1)
+        ]
+        check(
+            "photo proxy serves 0..n-1 and 404s past the end",
+            _codes[:GALLERY_N] == [200] * GALLERY_N and _codes[GALLERY_N] == 404,
+            _codes,
+        )
+        check(
+            "photo proxy: a negative index is a 404",
+            pg.request.get(BASE + "/api/listing-image?post=" + quote(GALLERY_URL) + "&i=-1").status
+            == 404,
+        )
+        check(
+            "photo proxy: no index still means photo 0",
+            pg.request.get(BASE + "/api/listing-image?post=" + quote(GALLERY_URL)).status == 200,
+        )
+
+        # Earlier desktop checks decide on whichever card is on top, and the
+        # gallery probe (score 5, rated a moment ago) is that card. Clear it
+        # back to undecided so it is certainly in the queue rail below.
+        js(
+            pg,
+            """async (k) => {
+              const [marketplace, id] = k.split(':');
+              await window.AIMM.api('/api/listing/flag', {
+                method: 'POST',
+                body: JSON.stringify({ marketplace, id, kept: false, hidden: false, my_rank: null }),
+              });
+            }""",
+            GALLERY_KEY,
+        )
+        pg.reload(wait_until="load")
+        pg.wait_for_timeout(3000)
+        pg.click("[data-mode=queue]:visible")
+        pg.wait_for_timeout(500)
+        pg.click(f"#rail .lrow[data-key={json.dumps(GALLERY_KEY)}]")
+        pg.wait_for_timeout(400)
+        pg.keyboard.press("Enter")
+        pg.wait_for_timeout(2200)
+        st = carousel_state(pg)
+        check(
+            "desktop: carousel renders one slide and one dot per photo",
+            st and st["slides"] == GALLERY_N and st["dots"] == GALLERY_N and st["dead"] == 0,
+            st,
+        )
+        check("desktop: the first dot starts active", st and st["active"] == 0, st)
+        check("desktop: the counter reads 1 / n", st and st["counter"] == f"1 / {GALLERY_N}", st)
+        check("desktop: previous / next arrows are offered", st and st["arrows"] == 2, st)
+        check(
+            "desktop: the whole gallery is not loaded up front",
+            st and 0 < st["loaded"] < GALLERY_N,
+            st and st["loaded"],
+        )
+
+        _loaded0 = st["loaded"] if st else 0
+        # "." and "," move photos. The arrows must NOT: they decide listings.
+        pg.keyboard.press(".")
+        pg.wait_for_timeout(900)
+        st = carousel_state(pg)
+        check(
+            "desktop: . moves to the next photo", st and st["index"] == 1 and st["active"] == 1, st
+        )
+        check(
+            "desktop: another slide loads as it comes into reach",
+            st and st["loaded"] > _loaded0,
+            st and (st["loaded"], _loaded0),
+        )
+        pg.keyboard.press(".")
+        pg.wait_for_timeout(900)
+        pg.keyboard.press(",")
+        pg.wait_for_timeout(900)
+        st = carousel_state(pg)
+        check("desktop: , moves back a photo", st and st["index"] == 1 and st["active"] == 1, st)
+        pg.keyboard.press("Shift+ArrowRight")
+        pg.wait_for_timeout(900)
+        st = carousel_state(pg)
+        check("desktop: Shift+arrow moves photos too", st and st["index"] == 2, st)
+        # ... and moving photos is all it did: the listing is still undecided.
+        # (That the bare arrows DO decide is checked at the end of this block.)
+        _grow = api_row(pg, GALLERY_KEY)
+        check(
+            "desktop: Shift+arrow decides nothing",
+            _grow and not _grow["kept"] and not _grow["hidden"],
+        )
+
+        # Swiping is the browser's own scroll on the snap track.
+        js(
+            pg,
+            "(n) => { const t = document.querySelector('#detail-pane .ph.gal .track'); if (t) { t.scrollLeft = t.clientWidth * n; t.dispatchEvent(new Event('scroll')); } }",
+            GALLERY_N - 1,
+        )
+        pg.wait_for_timeout(700)
+        st = carousel_state(pg)
+        check(
+            "desktop: scrolling the track moves the active dot",
+            st and st["index"] == GALLERY_N - 1 and st["active"] == GALLERY_N - 1,
+            st,
+        )
+        check(
+            "desktop: every slide is loaded by the last photo",
+            st and st["loaded"] == GALLERY_N,
+            st and st["loaded"],
+        )
+        pg.click("#detail-pane .ph.gal .gnav.prev")
+        pg.wait_for_timeout(800)
+        check(
+            "desktop: the arrow button steps back",
+            (carousel_state(pg) or {}).get("index") == GALLERY_N - 2,
+        )
+        pg.click("#detail-pane .ph.gal .dots i[data-dot='0']")
+        pg.wait_for_timeout(800)
+        check(
+            "desktop: a dot jumps straight to its photo",
+            (carousel_state(pg) or {}).get("index") == 0,
+        )
+        check("no horizontal overflow at 1440: carousel", overflow(pg) <= 1, f"{overflow(pg)}px")
+        check(
+            "carousel: nothing but the photo track scrolls sideways",
+            not js(pg, SIDEWAYS),
+            js(pg, SIDEWAYS)[:3],
+        )
+        pg.screenshot(path="/tmp/qa/carousel-desktop.png")
+
+        # Full-screen photo.
+        pg.click("#detail-pane .ph.gal .slide")
+        pg.wait_for_timeout(700)
+        check("desktop: tapping a photo opens the lightbox", visible(pg, "#lightbox"))
+        check(
+            "lightbox shows the current photo and its position",
+            js(pg, "!!document.querySelector('#lightbox-img').src")
+            and js(pg, "document.querySelector('#lightbox-count').textContent")
+            == f"1 / {GALLERY_N}",
+        )
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_timeout(800)
+        check(
+            "lightbox: bare arrows move photos where there is no listing to decide",
+            js(pg, "document.querySelector('#lightbox-count').textContent") == f"2 / {GALLERY_N}",
+            js(pg, "document.querySelector('#lightbox-count').textContent"),
+        )
+        pg.screenshot(path="/tmp/qa/lightbox-desktop.png")
+        pg.keyboard.press("Escape")
+        pg.wait_for_timeout(500)
+        check(
+            "desktop: Esc closes the lightbox, the detail stays",
+            not visible(pg, "#lightbox") and visible(pg, "#detail-pane"),
+        )
+        _grow = api_row(pg, GALLERY_KEY)
+        check("moving photos decides nothing", _grow and not _grow["kept"] and not _grow["hidden"])
+
+        # The review keys still mean what they always meant.
+        pg.keyboard.press("ArrowRight")
+        pg.wait_for_timeout(1300)
+        _grow = api_row(pg, GALLERY_KEY)
+        check("desktop: -> still keeps with the carousel present", _grow and _grow["kept"] is True)
+        pg.keyboard.press("z")
+        pg.wait_for_timeout(1300)
+        pg.keyboard.press("ArrowLeft")
+        pg.wait_for_timeout(1300)
+        _grow = api_row(pg, GALLERY_KEY)
+        check(
+            "desktop: <- still dismisses with the carousel present",
+            _grow and _grow["hidden"] is True,
+        )
+        pg.keyboard.press("z")
+        pg.wait_for_timeout(1300)
+        _grow = api_row(pg, GALLERY_KEY)
+        check(
+            "desktop: undo puts the gallery probe back in the queue",
+            _grow and not _grow["kept"] and not _grow["hidden"] and not _grow["reviewed_at"],
+            _grow and (_grow["kept"], _grow["hidden"], _grow["reviewed_at"]),
+        )
+    else:
+        check("carousel checks (no active item to probe)", True, "skipped")
     pg.click("[data-mode=queue]:visible")
     pg.wait_for_timeout(300)
 
@@ -2134,15 +2410,18 @@ with sync_playwright() as p:
             overlap(box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")) == 0,
             [box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")],
         )
-        had_photo = js(pg, "!!document.querySelector('#detail-pane .ph img')")
+        # Every photo has to fail, not just the first: a carousel drops the
+        # slides whose CDN URL expired and only gives up the whole block when
+        # none of them is left.
+        had_photo = js(pg, "document.querySelectorAll('#detail-pane .ph img').length")
         if had_photo:
             js(
                 pg,
-                "() => document.querySelector('#detail-pane .ph img').dispatchEvent(new Event('error'))",
+                "() => document.querySelectorAll('#detail-pane .ph img').forEach(i => i.dispatchEvent(new Event('error')))",
             )
-            pg.wait_for_timeout(300)
+            pg.wait_for_timeout(400)
         check(
-            f"{tag}: a failed photo takes its whole block (and its badge) with it",
+            f"{tag}: photos that all fail take their whole block (and its badge) with them",
             not js(pg, "!!document.querySelector('#detail-pane .ph')"),
             "" if had_photo else "no photo to fail",
         )
@@ -2275,19 +2554,92 @@ with sync_playwright() as p:
         js(pg, SIDEWAYS)[:3],
     )
     pg.screenshot(path="/tmp/qa/detail-sheet-390.png")
-    _had = js(pg, "!!document.querySelector('#detail-pane .ph img')")
+
+    # ---------- phone: the carousel is a swipe, not a widget ----------
+    # The gallery probe scores 5 and was rated a moment ago, so it is the top
+    # queue card -- which is the card this detail sheet is already showing.
+    _topkey = js(pg, "() => window.AIMM.review.cursor")
+    _gal_open = bool(GALLERY_KEY) and _topkey == GALLERY_KEY
+    check("390: the gallery probe is the card under review", _gal_open, _topkey)
+    if _gal_open:
+        st = carousel_state(pg)
+        check(
+            "390: carousel renders one slide and one dot per photo",
+            st and st["slides"] == GALLERY_N and st["dots"] == GALLERY_N and st["dead"] == 0,
+            st,
+        )
+        check(
+            "390: the track is a real horizontal scroller (the swipe)",
+            st and st["trackScrolls"],
+            st,
+        )
+        check(
+            "390: arrows are hidden on a phone -- the gesture is the control",
+            js(
+                pg,
+                "() => Array.from(document.querySelectorAll('#detail-pane .ph.gal .gnav')).every(b => getComputedStyle(b).display === 'none')",
+            ),
+        )
+        js(
+            pg,
+            "() => { const t = document.querySelector('#detail-pane .ph.gal .track'); if (t) { t.scrollLeft = t.clientWidth * 2; t.dispatchEvent(new Event('scroll')); } }",
+        )
+        pg.wait_for_timeout(700)
+        st = carousel_state(pg)
+        check(
+            "390: swiping the track moves the active dot",
+            st and st["index"] == 2 and st["active"] == 2,
+            st,
+        )
+        check("no horizontal overflow at 390: carousel", overflow(pg) <= 1, f"{overflow(pg)}px")
+        check(
+            "390: nothing but the photo track scrolls sideways",
+            not js(pg, SIDEWAYS),
+            js(pg, SIDEWAYS)[:3],
+        )
+        check(
+            "390: the score badge stays clear of the price with a carousel",
+            overlap(box(pg, "#detail-pane .ph .sc"), box(pg, "#detail-pane .price")) == 0,
+        )
+        pg.screenshot(path="/tmp/qa/carousel-390.png")
+        pg.tap("#detail-pane .ph.gal .slide[data-slide='2']")
+        pg.wait_for_timeout(800)
+        check("390: tapping a photo opens the full-screen lightbox", visible(pg, "#lightbox"))
+        _lb = box(pg, "#lightbox-img")
+        check(
+            "390: the lightbox photo fits the screen",
+            bool(_lb) and _lb["width"] <= 390 and _lb["top"] >= 0,
+            _lb and ("%.0fx%.0f" % (_lb["width"], _lb["height"])),
+        )
+        pg.screenshot(path="/tmp/qa/lightbox-390.png")
+        pg.tap("#lightbox-close")
+        pg.wait_for_timeout(600)
+        check(
+            "390: closing the lightbox returns to the detail",
+            not visible(pg, "#lightbox") and visible(pg, "#detail-pane"),
+        )
+        _grow = api_row(pg, GALLERY_KEY)
+        check(
+            "390: browsing photos left the listing undecided",
+            _grow and not _grow["kept"] and not _grow["hidden"],
+        )
+
+    # A dead photo hides itself; when every photo is dead the hero block goes
+    # entirely and the inline badge carries the score. (Before galleries this
+    # was one image; the rule is unchanged, it just takes all of them now.)
+    _had = js(pg, "document.querySelectorAll('#detail-pane .ph img').length")
     if _had:
         js(
             pg,
-            "() => document.querySelector('#detail-pane .ph img').dispatchEvent(new Event('error'))",
+            "() => document.querySelectorAll('#detail-pane .ph img').forEach(i => i.dispatchEvent(new Event('error')))",
         )
-        pg.wait_for_timeout(300)
+        pg.wait_for_timeout(400)
     _mob = js(
         pg,
         "(() => { const p = document.querySelector('#detail-pane'); const g = e => e ? JSON.parse(JSON.stringify(e.getBoundingClientRect())) : null; return {ph: !!p.querySelector('.ph'), sc: g(p.querySelector('.ph .sc')), badge: g(p.querySelector('.badges .sc')), price: g(p.querySelector('.price'))}; })()",
     )
     check(
-        "mobile: a failed photo takes its whole block with it",
+        "mobile: photos that all fail take their whole block with them",
         not _mob["ph"],
         "" if _had else "no photo to fail",
     )
@@ -2434,9 +2786,19 @@ with sync_playwright() as p:
 # only until here.
 for _key in _probe_keys:
     _cache.delete(_key)
+# The gallery probe is also decided on (kept, then undone) by the review-key
+# check, which leaves a USER_FLAGS row behind.
+if _probe_item:
+    _cache.delete((_CT.USER_FLAGS.value, "facebook", GALLERY_ID))
+for _path in _probe_files:
+    try:
+        _path.unlink()
+    except OSError:
+        pass
 check(
     "tier probes cleaned out of the shared cache", all(_cache.get(k) is None for k in _probe_keys)
 )
+check("probe photo snapshots cleaned off disk", not any(p.exists() for p in _probe_files))
 
 # Resource-error console text omits the URL; it rides in the message location.
 errors = [

@@ -771,3 +771,60 @@ class Translator:
     def __call__(self: "Translator", word: str) -> str:
         """Return translated version"""
         return self._dictionary.get(word, word)
+
+
+# ---------------------------------------------------------------------------
+# Listing photo snapshots.
+#
+# Facebook's CDN URLs are signed and expire within days, so a listing rated on
+# Monday shows a broken image by Friday. The web UI proxies photos through
+# /api/listing-image, which fetches once and keeps the bytes here; the monitor
+# pre-warms the same directory for listings worth reviewing so the photos are
+# already on disk by the time the user opens the queue.
+#
+# Naming is load-bearing: photo 0 keeps the historical `<key>.img` name so
+# every snapshot taken before multi-photo support still resolves, and photos
+# 1..n append `-<i>`.
+# ---------------------------------------------------------------------------
+image_cache_dir = amm_home / "imgcache"
+
+
+def image_cache_path(post_url: str, index: int = 0) -> Path:
+    """On-disk snapshot path for the index-th photo of a listing."""
+    key = hashlib.sha256(post_url.split("?")[0].encode()).hexdigest()[:32]
+    return image_cache_dir / (f"{key}.img" if index <= 0 else f"{key}-{index}.img")
+
+
+# 5 MB is well above any Marketplace photo and well below "someone linked a
+# video file"; the proxy and the pre-warmer share the ceiling.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# A plain browser UA and no referrer is what the CDN expects from a direct
+# visit; hotlink-looking requests get a 403.
+IMAGE_FETCH_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+
+
+def fetch_image_snapshot(url: str, destination: Path, timeout: int = 15) -> bool:
+    """Download one photo to `destination`. False on any failure, never raises.
+
+    Expired CDN URLs are the common case, not an error worth logging loudly.
+    """
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        image_cache_dir.mkdir(parents=True, exist_ok=True)
+        resp = requests.get(url, timeout=timeout, headers=IMAGE_FETCH_HEADERS, stream=True)
+        if resp.status_code != 200:
+            return False
+        content = resp.raw.read(MAX_IMAGE_BYTES + 1, decode_content=True)
+        if not content or len(content) > MAX_IMAGE_BYTES:
+            return False
+        # Write through a temp file so a torn download never becomes a
+        # permanently cached zero-byte "photo".
+        tmp = destination.with_suffix(".part")
+        tmp.write_bytes(content)
+        tmp.replace(destination)
+        return True
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return False

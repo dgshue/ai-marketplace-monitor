@@ -281,6 +281,8 @@ def test_config(config_file: Callable, config_content: str, acceptable: bool) ->
         # config normalizes to a single-element list, and None still means
         # "search every marketplace".
         "marketplace": (list, type(None)),
+        # Photos to snapshot per review-worthy listing; Facebook only.
+        "max_images": (int, type(None)),
         "max_listings": (int, type(None)),
         "max_price": (str, type(None)),
         "max_search_interval": (int, type(None)),

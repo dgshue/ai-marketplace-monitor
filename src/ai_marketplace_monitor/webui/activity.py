@@ -371,6 +371,12 @@ def build_activity(
                     "price": listing.price,
                     "location": listing.location,
                     "image": listing.image or "",
+                    # The whole gallery, and its length so the carousel can
+                    # lay out slides without waiting for any of them to load.
+                    # One entry (or none) for every source but Facebook, and
+                    # for Facebook listings cached before galleries existed.
+                    "images": listing.photos,
+                    "image_count": len(listing.photos),
                     # Item coordinates for the pickup map; None when the
                     # location string does not geocode.
                     "coords": (lambda c: list(c) if c else None)(resolve(listing.location or "")),

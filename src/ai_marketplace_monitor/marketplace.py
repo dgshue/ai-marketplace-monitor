@@ -40,6 +40,14 @@ DEFAULT_REVIEW_RATING: int = 3
 
 DEFAULT_REQUEST_DELAY: Tuple[int, int] = (6, 15)
 
+# How many photos of a review-worthy listing to copy to disk when neither the
+# item nor its marketplace sets `max_images`. Six covers what a Marketplace
+# listing usually has that is worth looking at, at roughly 150 KB a photo.
+DEFAULT_MAX_IMAGES: int = 6
+# A Marketplace listing can carry twenty photos; past a dozen they are angles
+# of the same scratch, and each one is a CDN request and a file on disk.
+MAX_IMAGES_CEILING: int = 12
+
 # How long to stop touching a marketplace after it signals a block. The only
 # concrete number the ecosystem offers is "at least an hour" before retrying a
 # temporarily-banned Facebook account (kevinzg/facebook-scraper issue #390);
@@ -266,6 +274,12 @@ class MarketItemCommonConfig(BaseConfig):
     # hours. Unset means "no cap" here; the browser-tile backends apply their
     # own default (see browser_market.DEFAULT_MAX_LISTINGS).
     max_listings: int | None = None
+    # How many of a listing's photos to snapshot once it is worth reviewing.
+    # Facebook's CDN URLs expire within days, so a photo that is not copied
+    # to disk while the listing is fresh is a broken image by the time the
+    # user opens the queue. Facebook only: every other source is read from
+    # search tiles that carry exactly one photo. 0 disables snapshotting.
+    max_images: int | None = None
     rating: List[int] | None = None
     # The lower of the two score tiers: a listing at or above `review_rating`
     # enters the web UI's review queue; one at or above `rating` additionally
@@ -632,6 +646,26 @@ class MarketItemCommonConfig(BaseConfig):
                     pass
             if not acceptable:
                 raise ValueError(f"Item {hilight(self.name)} start_at {val} is not recognized.")
+
+    def handle_max_images(self: "MarketItemCommonConfig") -> None:
+        if self.max_images is None:
+            return
+        if isinstance(self.max_images, str) and self.max_images.strip().isdigit():
+            self.max_images = int(self.max_images.strip())
+        if isinstance(self.max_images, bool) or not isinstance(self.max_images, int):
+            raise ValueError(
+                f"Item {hilight(self.name)} max_images must be a whole number of photos."
+            )
+        if self.max_images < 0:
+            raise ValueError(
+                f"Item {hilight(self.name)} max_images cannot be negative "
+                f"(got {self.max_images}); use 0 to keep no photos."
+            )
+        if self.max_images > MAX_IMAGES_CEILING:
+            raise ValueError(
+                f"Item {hilight(self.name)} max_images is capped at {MAX_IMAGES_CEILING}, "
+                f"not {self.max_images}."
+            )
 
     def handle_rating(self: "MarketItemCommonConfig") -> None:
         if self.rating is None:

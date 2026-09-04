@@ -421,6 +421,8 @@
     { value: "local_pick_up", label: "Local pick-up" },
     { value: "shipping", label: "Shipping" },
   ];
+  const MAX_IMAGES_HELP =
+    "How many of a listing's photos to keep once the AI rates it worth reviewing. Default: 6, maximum 12, 0 to keep none. Facebook only for now — eBay, Depop and Poshmark are read from search tiles that carry a single photo each, so those listings show one picture whatever this says. Photos are copied to disk because Facebook's image links are signed and expire within days: a photo not saved while the listing is fresh is a broken image by the time you get to it.";
   const MAX_LISTINGS_HELP =
     "How many results one search phrase may hand to the AI. Default: 60. Every listing that comes back costs one AI rating — about 25 seconds on a local Ollama — so a phrase that returns 240 tiles is an hour of rating for that phrase alone.";
 
@@ -461,6 +463,7 @@
         help: "Two numbers, e.g. '6, 15'. The monitor waits a random time in that range before every Facebook page load — a search page or a listing page. Default: 6 to 15 seconds. Lower it and blocks get likely; a fixed value (e.g. '10, 10') is worse than a range, because a metronome is the easiest bot signature there is." },
       { key: "block_cooldown", label: "Pause after a block", type: "text", column: "right",
         help: "How long to stop searching Facebook entirely once it serves a block page ('You're temporarily blocked', a checkpoint, or a bounce to login). Default: 2h, doubling for repeat blocks up to 8h. You get one notification, and the Status page offers 'Clear block' if you know the block has lifted." },
+      { key: "max_images", label: "Photos to keep per listing", type: "number", group: "Photos", column: "right", help: MAX_IMAGES_HELP },
       { key: "search_interval", label: "Search every (minimum)", type: "text", group: "Schedule", column: "right", help: "Default cadence for every item that does not set its own. Duration, e.g. '30m', '1h'. Default: 30 min." },
       { key: "max_search_interval", label: "… and at most", type: "text", column: "right", help: "Upper bound for the random interval jitter. Default: 1 hour." },
       { key: "start_at", label: "Start at", type: "text", advanced: true, column: "right", help: "Comma-separated time patterns: 'HH:MM', '*:MM', '*:*:SS'." },
@@ -557,6 +560,7 @@
       { key: "prompt", label: "AI prompt", type: "textarea", column: "right", advanced: true },
       { key: "extra_prompt", label: "Extra prompt", type: "textarea", column: "right", advanced: true },
       { key: "rating_prompt", label: "Rating prompt", type: "textarea", column: "right", advanced: true },
+      { key: "max_images", label: "Photos to keep per listing", type: "number", column: "right", advanced: true, help: MAX_IMAGES_HELP + " Blank inherits the marketplace value." },
       { key: "search_interval", label: "Search every (minimum)", type: "text", group: "Schedule", column: "right",
         help: "Duration, e.g. '45m', '2h', '1d'. Blank inherits the marketplace value (30m by default). Every search phrase on this item is its own page load, so a six-phrase item searched every 30 minutes is 288 page loads a day — enough to get an account temporarily blocked." },
       { key: "max_search_interval", label: "… and at most", type: "text", column: "right",
