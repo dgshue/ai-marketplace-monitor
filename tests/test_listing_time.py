@@ -12,7 +12,7 @@ import datetime
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Any, Dict, Iterator
 
 import pytest
 from diskcache import Cache  # type: ignore
@@ -168,8 +168,8 @@ def test_translated_vocabulary() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _listing(**overrides: object) -> Listing:
-    base = {
+def _listing(**overrides: Any) -> Listing:
+    base: Dict[str, Any] = {
         "marketplace": "facebook",
         "name": "",
         "id": "1234567890",
